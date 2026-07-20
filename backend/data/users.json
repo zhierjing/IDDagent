@@ -1,0 +1,16 @@
+{
+  "72c1c9c0-2943-4ff8-83d9-25092ed5c7d8" : {
+    "password" : "648cb5efa24311998885e84f57345e69$7da00b66a1f8eb0fdaa20563a87a815c79ed183775aaa3c5ef503e94663b9584",
+    "bank_institution" : "福建分行",
+    "created_at" : "2026-07-20T06:51:29.980572600Z",
+    "id" : "72c1c9c0-2943-4ff8-83d9-25092ed5c7d8",
+    "username" : "admin"
+  },
+  "abe5f029-df25-4715-a031-9348a4086b91" : {
+    "password" : "548003e6756be7dd37aa6c6be6da9ba5$86f0fbd380826b178f517d4882fa6f4b453f1857ea812598d2c9bed659caba82",
+    "bank_institution" : "福建分行",
+    "created_at" : "2026-07-20T02:41:22.055434Z",
+    "id" : "abe5f029-df25-4715-a031-9348a4086b91",
+    "username" : "chx"
+  }
+}

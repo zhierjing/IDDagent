@@ -1,0 +1,31 @@
+server:
+  port: ${PORT:8000}
+
+spring:
+  profiles:
+    include: local
+  webflux:
+    static-path-pattern: /h5/**
+  web:
+    resources:
+      static-locations: classpath:/static/
+
+app:
+  deepseek:
+    api-key: ${DEEPSEEK_API_KEY:}
+    base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+  model:
+    name: ${MODEL_NAME:deepseek-v4-flash}
+    coordinator: ${COORDINATOR_MODEL:deepseek-chat}
+    follow-up: ${FOLLOW_UP_MODEL:deepseek-chat}
+  jwt:
+    secret: ${JWT_SECRET:}
+    expire-hours: 24
+  data:
+    dir: data
+  upload:
+    dir: static/uploads/account_opening
+
+logging:
+  level:
+    com.cropagent: DEBUG
