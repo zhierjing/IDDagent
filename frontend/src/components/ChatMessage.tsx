@@ -7,6 +7,7 @@ import RiskCheckCard from './RiskCheckCard';
 import HistoricalDDQueryCard from './HistoricalDDQueryCard';
 import InformationCheckCard from './InformationCheckCard';
 import ReportGenerateCard from './ReportGenerateCard';
+import CompanyQueryCard from './CompanyQueryCard';
 import CompanyNameSelector from './CompanyNameSelector';
 import FollowUpChip from './FollowUpChip';
 
@@ -179,22 +180,32 @@ const ChatMessageComponent: React.FC<ChatMessageProps> = ({ message, onSendMessa
         if (skillName === 'generate_report') {
           return <ReportGenerateCard data={message.extra} onSendMessage={onSendMessage} />;
         }
+        if (skillName && skillName.startsWith('query_')) {
+          return <CompanyQueryCard data={message.extra} onSendMessage={onSendMessage} />;
+        }
 
         // 兜底：按字段特征匹配（兼容旧数据）
         return <RiskCheckCard data={message.extra} onSendMessage={onSendMessage} />;
       }
 
       // 候选企业选择器（企业名匹配到多条结果时让用户选择）
+      // 说明文本作为独立回答气泡显示在选项卡之前，不放在卡片底部
       if (extraAction === 'company_name_candidates') {
         const options = message.extra.options as { credit_code: string; company_name: string }[] | undefined;
         if (options && options.length > 0) {
           return (
-            <CompanyNameSelector
-              options={options}
-              message={message.extra.message as string}
-              keyword={message.extra.keyword as string}
-              onSendMessage={onSendMessage}
-            />
+            <>
+              {typeof message.extra.message === 'string' && message.extra.message ? (
+                <div className="bg-white text-gray-800 rounded-2xl rounded-bl-md px-4 py-3 shadow-sm border border-gray-100 text-sm leading-relaxed mb-3 max-w-[75%]">
+                  {message.extra.message}
+                </div>
+              ) : null}
+              <CompanyNameSelector
+                options={options}
+                keyword={message.extra.keyword as string}
+                onSendMessage={onSendMessage}
+              />
+            </>
           );
         }
       }

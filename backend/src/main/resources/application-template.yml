@@ -2,6 +2,10 @@ server:
   port: ${PORT:8000}
 
 spring:
+  config:
+    import:
+      - optional:file:backend/.env[.properties]
+      - optional:file:.env[.properties]
   webflux:
     static-path-pattern: /h5/**
   web:
