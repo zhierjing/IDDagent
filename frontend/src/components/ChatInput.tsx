@@ -5,6 +5,8 @@ import { uploadChatAttachment } from '../api/agent';
 interface ChatInputProps {
   onSend: (message: string, attachments?: ChatAttachment[]) => void;
   disabled: boolean;
+  /** 对话进行中时可调用的终止回调 */
+  onStop?: () => void;
 }
 
 /** 本地附件项（含上传状态） */
@@ -33,7 +35,7 @@ function formatSize(bytes: number): string {
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
 const MAX_ATTACHMENTS = 5;
 
-const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
+const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled, onStop }) => {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -216,6 +218,21 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
               Shift + Enter 换行
             </div>
           </div>
+          {/* 停止生成按钮：对话进行中时显示，点击终止当前对话 */}
+          {disabled && onStop && (
+            <button
+              onClick={onStop}
+              className="flex-shrink-0 w-10 h-10 rounded-xl border border-red-300 bg-red-50 text-red-600
+                         hover:bg-red-100 hover:border-red-400
+                         transition-all duration-200 flex items-center justify-center
+                         active:scale-95"
+              title="停止生成"
+            >
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+            </button>
+          )}
           <button
             onClick={handleSend}
             disabled={!canSend}

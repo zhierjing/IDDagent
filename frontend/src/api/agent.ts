@@ -127,7 +127,8 @@ export async function sendMessageStream(
   onEvent: (event: SSEEvent) => void,
   onError: (error: Error) => void,
   onDone: () => void,
-  attachments?: ChatAttachment[]
+  attachments?: ChatAttachment[],
+  signal?: AbortSignal
 ): Promise<void> {
   let doneCalled = false;
   const safeDone = () => { if (!doneCalled) { doneCalled = true; onDone(); } };
@@ -136,6 +137,7 @@ export async function sendMessageStream(
     const res = await fetch(`${API_BASE}/chat/stream`, {
       method: 'POST',
       headers: authHeaders(),
+      signal,
       body: JSON.stringify({
         message,
         conversationId: conversationId,

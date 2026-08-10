@@ -11,6 +11,7 @@ interface UseChatReturn {
   messages: ChatMessage[];
   isSending: boolean;
   sendMessage: (content: string, overrideConvId?: string, attachments?: ChatAttachment[]) => Promise<void>;
+  stopStreaming: () => void;
   clearMessages: () => void;
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
 }
@@ -23,6 +24,8 @@ export function useChat(
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
   const isSendingRef = useRef(false);
+  // 当前请求的 AbortController，用于终止流式对话
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // 用 ref 追踪最新值，避免闭包陈旧引用
   const conversationIdRef = useRef(conversationId);
@@ -41,6 +44,8 @@ export function useChat(
 
       isSendingRef.current = true;
       setIsSending(true);
+      // 为本次请求创建 AbortController，供 stopStreaming 终止使用
+      abortControllerRef.current = new AbortController();
 
       // 添加用户消息
       const userMsg: ChatMessage = {
@@ -304,14 +309,18 @@ export function useChat(
           console.error('发送消息失败:', error);
           isSendingRef.current = false;
           setIsSending(false);
+          abortControllerRef.current = null;
+          // 用户主动终止（AbortError）：保留已生成内容，不显示错误提示
+          const isAborted = error.name === 'AbortError';
           setMessages((prev) =>
             prev.map((msg) =>
               isStreamingMessage(msg) && msg.id === assistantMsgId
                 ? {
                     id: msg.id,
                     role: 'assistant' as const,
-                    content: `抱歉，请求失败：${error.message}`,
-                    isStreaming: false,
+                    content: isAborted
+                      ? (msg.content || '对话已终止')
+                      : `抱歉，请求失败：${error.message}`,
                     created_at: msg.created_at,
                   }
                 : msg
@@ -322,8 +331,10 @@ export function useChat(
           // 完成回调
           isSendingRef.current = false;
           setIsSending(false);
+          abortControllerRef.current = null;
         },
-        attachments
+        attachments,
+        abortControllerRef.current.signal
       );
     },
     [onConversationIdChange]
@@ -333,10 +344,16 @@ export function useChat(
     setMessages([]);
   }, []);
 
+  // 终止当前对话：中止流式请求，已生成的内容会保留
+  const stopStreaming = useCallback(() => {
+    abortControllerRef.current?.abort();
+  }, []);
+
   return {
     messages,
     isSending,
     sendMessage,
+    stopStreaming,
     clearMessages,
     setMessages,
   };
