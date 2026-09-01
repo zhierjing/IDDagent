@@ -96,8 +96,6 @@ export interface RiskCheckResult {
   action: 'result' | 'ambiguous' | 'not_found';
   credit_code?: string;
   company_name?: string;
-  has_risk?: boolean;
-  risk_level?: string;
   risk_summary?: string;
   h5_url?: string;
   message?: string;
@@ -125,7 +123,9 @@ export interface ReportTemplate {
 export interface ReportGenerateResult {
   action: 'result' | 'not_found';
   _skill_name: 'generate_report';
-  stage: 'templates' | 'upload' | 'generating' | 'done';
+  stage: 'templates' | 'upload' | 'generating' | 'done' | 'redirect' | 'progress';
+  /** 恢复路径补发标记（穿插恢复时 supersede 取代穿插前旧跳转卡）：前端据此移除旧跳转卡 */
+  supersede_redirect?: boolean;
   report_id?: string;
   message?: string;
 
@@ -239,11 +239,27 @@ export interface IntentCandidatesData {
 // 多意图任务管道类型
 // ============================================================
 
+/** 单任务执行状态 */
+export type PipelineTaskStatus =
+  | 'PENDING'
+  | 'WAITING_INPUT'
+  | 'RUNNING'
+  | 'DONE'
+  | 'FAILED'
+  | 'WAITING_EXTERNAL';
+
 /** 计划中的单个任务 */
 export interface PipelineTask {
   skill: string;
   label: string;
   order: number;
+  /**
+   * 任务执行状态（缺省时由前端按 currentOrder/paused/completed 推导：
+   * 已完成 -> DONE、当前进度且暂停 -> WAITING_INPUT、当前进度 -> RUNNING、其余 -> PENDING）
+   */
+  status?: PipelineTaskStatus;
+  /** 步骤摘要（可选，展示在步骤名称下方） */
+  summary?: string;
 }
 
 /** planning 事件数据（后端 TaskPlanner 计划快照） */
@@ -252,6 +268,8 @@ export interface PlanningData {
   text?: string;
   /** true = 暂停恢复（前端更新已有清单卡片）；false/缺省 = 首次规划（新建卡片） */
   resume?: boolean;
+  /** 任务标识（Phase 1：一个独立意图 = 一个 frameId，resume 时优先按此精确匹配历史任务卡） */
+  frameId?: string;
 }
 
 /** task_start 事件数据（某个任务开始执行） */
@@ -261,12 +279,16 @@ export interface TaskStartData {
   skill: string;
   label: string;
   order: number;
+  /** 任务标识（Phase 1） */
+  frameId?: string;
 }
 
 /** pipeline_paused 事件数据（多意图管道暂停，等待用户补充信息） */
 export interface PipelinePausedData {
   /** 当前任务等待用户补充的提示文案（如"请上传该企业的营业执照图片以进行信息核实。"） */
   hint?: string;
+  /** 任务标识（Phase 1） */
+  frameId?: string;
 }
 
 /** task_done 事件数据（多意图管道中某个任务执行完成） */
@@ -277,6 +299,8 @@ export interface TaskDoneData {
   skill: string;
   /** 已完成任务的展示标签 */
   label: string;
+  /** 任务标识（Phase 1） */
+  frameId?: string;
 }
 
 /**
@@ -302,9 +326,37 @@ export type PipelineExtra = {
   paused?: boolean;
   /** 管道是否已全部完成（done 事件后） */
   completed?: boolean;
+  /** 管道是否已挂起（意图穿插时旧管道卡标记，可穿插其他任务） */
+  suspended?: boolean;
+  /** 是否等待用户确认下一步（模板选择/候选确认等暂停场景，等待点击后继续） */
+  waitingConfirm?: boolean;
+  /** 汇总文案（完成态汇总，如"N 项任务已完成"；优先级高于默认执行中文案） */
+  summary?: string;
   /** 规划文本（"我将依次为您执行：① …"） */
   text?: string;
+  /** 任务标识（Phase 1：一个独立意图 = 一个 frameId，恢复/穿插定位依据） */
+  frameId?: string;
 };
+
+// ============================================================
+// 意图穿插数据类型
+// ============================================================
+
+/** 意图穿插询问数据（旧管道挂起时，新意图执行完毕后的断点询问） */
+export interface InterruptAskData {
+  /** 询问文案（"您之前还有 N 项任务未完成，是否继续执行？"） */
+  message: string;
+  /** 被挂起旧管道的剩余任务摘要 [{skill,label,order},...] */
+  plan_summary: { skill: string; label: string; order: number }[];
+  /** 剩余任务总数 */
+  total: number;
+  /** 已答复标记：继续/放弃任一点击后为 true（后端落盘，刷新/切换会话后恢复置灰） */
+  answered?: boolean;
+  /** 被询问挂起层的任务标识（Phase 1：优先按此精确匹配历史恢复卡） */
+  frameId?: string;
+  /** 本次询问交互标识（Phase 6：随按钮协议回传，定位卡片归属） */
+  interactionId?: string;
+}
 
 // ============================================================
 // SSE 事件类型定义
@@ -330,6 +382,9 @@ export type SSEEventType =
   | 'need_date_range'
   | 'pipeline_paused'
   | 'task_done'
+  | 'interrupt_ask'
+  | 'stale_action'
+  | 'interaction_suspended'
   | 'done'
   | 'error';
 
@@ -339,7 +394,7 @@ export interface SSEEvent {
   content?: string;
   message_id?: string;
   conversation_id?: string;
-  data?: PotentialCustomerSummary | PotentialCustomerDetail | RiskCheckResult | ReportGenerateResult | InformationCheckResult | HistoricalDDQueryResult | CompanyNameCandidatesData | IntentCandidatesData | PlanningData | TaskStartData | PipelinePausedData | TaskDoneData;
+  data?: PotentialCustomerSummary | PotentialCustomerDetail | RiskCheckResult | ReportGenerateResult | InformationCheckResult | HistoricalDDQueryResult | CompanyNameCandidatesData | IntentCandidatesData | PlanningData | TaskStartData | PipelinePausedData | TaskDoneData | InterruptAskData;
 }
 
 // ============================================================

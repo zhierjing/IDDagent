@@ -56,8 +56,10 @@ public class CompanyQuerySkill {
         SKILL_META.put("query_shareholder_info", new Object[]{List.of("股东", "股权结构", "股权分布"), List.of(), 40, "query"});
         SKILL_META.put("query_beneficiary_info", new Object[]{List.of("受益人", "实际控制人", "受益所有人"), List.of(), 40, "query"});
         SKILL_META.put("query_company_genealogy", new Object[]{List.of("企业族谱", "家族图谱", "关联企业图谱"), List.of(), 40, "query"});
-        SKILL_META.put("query_customs_auth", new Object[]{List.of("海关认证", "海关高级认证", "AEO认证"), List.of("海关失信", "海关黑名单"), 40, "customs"});
-        SKILL_META.put("query_customs_blacklist", new Object[]{List.of("海关失信", "海关黑名单", "海关失信名单"), List.of("海关认证", "AEO认证"), 40, "customs"});
+        // "海关"上义词同时进入两技能触发词：仅含"海关+泛化后缀"（如"查询海关信息"）时同组平票 → 走 LLM 仲裁输出 clarify；
+        // blacklist 额外排除"海关高级认证"，保证"海关高级认证"类明确输入仍由 auth 唯一确定性命中
+        SKILL_META.put("query_customs_auth", new Object[]{List.of("海关", "海关认证", "海关高级认证", "AEO认证"), List.of("海关失信", "海关黑名单"), 40, "customs"});
+        SKILL_META.put("query_customs_blacklist", new Object[]{List.of("海关", "海关失信", "海关黑名单", "海关失信名单"), List.of("海关认证", "海关高级认证", "AEO认证"), 40, "customs"});
         SKILL_META.put("query_account_freeze_tag", new Object[]{List.of("冻结", "司法冻结", "账户冻结"), List.of(), 40, "query"});
         SKILL_META.put("query_credit_granting", new Object[]{List.of("授信", "授信额度", "综合授信", "授信余额"), List.of(), 40, "query"});
         SKILL_META.put("query_pboc_account_control", new Object[]{List.of("人行账管", "人民银行账户管理", "账户管控", "央行账户管理"), List.of(), 40, "query"});
@@ -127,7 +129,7 @@ public class CompanyQuerySkill {
             if (resolved.containsKey("credit_code")) {
                 return buildResult(skillName, queryType, (String) resolved.get("credit_code"));
             }
-            // ambiguous / not_found（带 options 候选）→ 透传给前端，附查询标签供候选按钮拼消息
+            // ambiguous（带 options 候选）→ 透传给前端，附查询标签供候选按钮拼消息
             Map<String, Object> resp = new LinkedHashMap<>(resolved);
             resp.put("query_type", queryType);
             resp.put("query_label", SKILL_LABEL.get(skillName));

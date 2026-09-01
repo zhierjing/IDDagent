@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { ChatMessage, ChatAttachment, PipelineExtra } from '../types';
+import type { ChatMessage, ChatAttachment, PipelineExtra, InterruptAskData } from '../types';
 import { isStreamingMessage } from '../types';
 import RiskCheckCard from './RiskCheckCard';
 import HistoricalDDQueryCard from './HistoricalDDQueryCard';
@@ -10,13 +10,14 @@ import ReportGenerateCard from './ReportGenerateCard';
 import CompanyQueryCard from './CompanyQueryCard';
 import CompanyNameSelector from './CompanyNameSelector';
 import IntentSelector from './IntentSelector';
+import InterruptAskCard from './InterruptAskCard';
 import FollowUpChip from './FollowUpChip';
 import TaskProgressCard from './TaskProgressCard';
 
 interface ChatMessageProps {
   message: ChatMessage;
-  /** 发送消息回调（用于卡片交互） */
-  onSendMessage?: (content: string) => void;
+  /** 发送消息回调（用于卡片交互）；silent=true 时静默发送（不展示为用户气泡） */
+  onSendMessage?: (content: string, silent?: boolean) => void;
 }
 
 /** 格式化文件大小 */
@@ -37,7 +38,6 @@ function getExtraCopyText(extra: Record<string, unknown>): string {
   if (label) parts.push(`【${label}】`);
   if (extra.company_name) parts.push(`企业名称：${extra.company_name}`);
   if (extra.credit_code) parts.push(`统一社会信用代码：${extra.credit_code}`);
-  if (extra.risk_level) parts.push(`风险等级：${extra.risk_level}`);
   if (extra.risk_summary) parts.push(`风险摘要：${extra.risk_summary}`);
   if (extra.analysis_summary) parts.push(`分析摘要：${extra.analysis_summary}`);
   if (extra.needs_summary) parts.push(`需求摘要：${extra.needs_summary}`);
@@ -170,6 +170,16 @@ const ChatMessageComponent: React.FC<ChatMessageProps> = ({ message, onSendMessa
         return <TaskProgressCard data={message.extra as unknown as PipelineExtra} />;
       }
 
+      // 意图穿插断点询问卡片（旧管道挂起时询问是否继续执行）
+      if (extraAction === 'interrupt_ask') {
+        return (
+          <InterruptAskCard
+            data={message.extra as unknown as InterruptAskData}
+            onSendMessage={onSendMessage}
+          />
+        );
+      }
+
       // 结构化卡片渲染（优先根据 _skill_name 路由，兜底按字段匹配）
       if (extraAction === 'result' || extraAction === 'ambiguous' || extraAction === 'not_found') {
         const skillName = message.extra._skill_name as string | undefined;
@@ -198,20 +208,29 @@ const ChatMessageComponent: React.FC<ChatMessageProps> = ({ message, onSendMessa
       // 候选企业选择器（企业名匹配到多条结果时让用户选择）
       // 仅渲染选择卡片：匹配数量说明由卡片头部展示（"搜索到 N 家名称包含「XX」的企业"），
       // 不再额外输出独立文字气泡，避免重复
+      // options 为空（未匹配到任何企业）时同样渲染：CompanyNameSelector 内部展示
+      // "未找到企业"空态面板（无"以上都不是"选项），避免整条消息空白
       if (extraAction === 'company_name_candidates') {
         const options = message.extra.options as { credit_code: string; company_name: string }[] | undefined;
-        if (options && options.length > 0) {
-          return (
-            <CompanyNameSelector
-              options={options}
-              keyword={message.extra.keyword as string}
-              // 所属任务标识（如"历史尽调报告查询"）：useChat 在事件处理时已从最后一张
-              // 任务清单卡片推断并持久化，重载会话后仍可恢复展示；旧消息无此字段时降级
-              taskLabel={message.extra.task_label as string | undefined}
-              onSendMessage={onSendMessage}
-            />
-          );
-        }
+        return (
+          <CompanyNameSelector
+            options={options ?? []}
+            keyword={message.extra.keyword as string}
+            // 所属任务标识（如"历史尽调报告查询"）：useChat 在事件处理时已从最后一张
+            // 任务清单卡片推断并持久化，重载会话后仍可恢复展示；旧消息无此字段时降级
+            taskLabel={message.extra.task_label as string | undefined}
+            // 查询功能标签（如"基本信息"）：后端候选事件注入，供已确认候选后点击企业
+            // 选项时拼接"帮我查一下{公司名}{标签}"直接触发对应功能；旧消息无此字段时组件内降级
+            queryLabel={message.extra.query_label as string | undefined}
+            // 候选确认状态（后端落盘 confirmed）：刷新/切换会话重载后识别"已确认过候选"，
+            // 点击企业选项直接发起功能查询而非重复候选确认
+            confirmed={message.extra.confirmed === true}
+            // Phase 6（交互 ID 化）：卡片所属帧与交互标识，点击回传后后端校验帧归属
+            frameId={message.extra.frameId as string | undefined}
+            interactionId={message.extra.interactionId as string | undefined}
+            onSendMessage={onSendMessage}
+          />
+        );
       }
 
       // 意图澄清选择器（多候选仲裁低置信度时让用户选择）
@@ -222,6 +241,9 @@ const ChatMessageComponent: React.FC<ChatMessageProps> = ({ message, onSendMessa
             <IntentSelector
               candidates={candidates}
               message={message.extra.message as string}
+              // Phase 6（交互 ID 化）：卡片所属帧与交互标识，点击回传后后端校验帧归属
+              frameId={message.extra.frameId as string | undefined}
+              interactionId={message.extra.interactionId as string | undefined}
               onSendMessage={onSendMessage}
             />
           );

@@ -3,14 +3,15 @@
 // ============================================================
 
 import React, { useState, useCallback, useRef } from 'react';
-import type { ChatMessage, SSEEvent, ChatAttachment, PipelineExtra, PlanningData, TaskStartData, TaskDoneData, PipelineTask } from '../types';
+import type { ChatMessage, SSEEvent, ChatAttachment, PipelineExtra, PlanningData, TaskStartData, TaskDoneData, PipelineTask, InterruptAskData } from '../types';
 import { isStreamingMessage } from '../types';
 import { sendMessageStream, stopChatStream } from '../api/agent';
 
 interface UseChatReturn {
   messages: ChatMessage[];
   isSending: boolean;
-  sendMessage: (content: string, overrideConvId?: string, attachments?: ChatAttachment[]) => Promise<void>;
+  /** silent=true：静默发送（卡片候选选择等），不插入用户气泡，直接进入助手响应 */
+  sendMessage: (content: string, overrideConvId?: string, attachments?: ChatAttachment[], forceSend?: boolean, silent?: boolean) => Promise<void>;
   stopStreaming: () => void;
   clearMessages: () => void;
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
@@ -35,10 +36,38 @@ export function useChat(
   onMessageCompleteRef.current = onMessageComplete;
 
   const sendMessage = useCallback(
-    async (content: string, overrideConvId?: string, attachments?: ChatAttachment[]) => {
+    async (content: string, overrideConvId?: string, attachments?: ChatAttachment[], forceSend?: boolean, silent?: boolean) => {
       const effectiveConvId = overrideConvId ?? conversationIdRef.current;
       const hasAttachments = !!attachments && attachments.length > 0;
-      if ((!content.trim() && !hasAttachments) || isSendingRef.current) return;
+      if ((!content.trim() && !hasAttachments) || (isSendingRef.current && !forceSend)) return;
+
+      // 候选确认消息（"公司：xxx\n统一信用代码：xxx"）：乐观标记最新候选选择卡 confirmed=true，
+      // 使 CompanyNameSelector 实时点击第 1 次后立即进入"已确认"态（组件不重建时无需等后端
+      // 落盘）；与后端 markCompanyCardConfirmed 持久化配合，刷新/切换会话重载后仍保持已确认，
+      // 再次点击企业选项直接发起功能查询（"帮我查一下{公司}{查询功能}"）而非重复候选确认。
+      // Phase 6：结构化候选协议（select_candidate JSON）同样触发乐观标记
+      const looksLikeCandidateConfirm =
+        content.includes('公司') && content.includes('统一信用代码')
+        || content.includes('"action":"select_candidate"');
+      if (looksLikeCandidateConfirm) {
+        setMessages((prev) => {
+          const next = [...prev];
+          for (let i = next.length - 1; i >= 0; i--) {
+            const m = next[i];
+            const ex = (m as { extra?: Record<string, unknown> }).extra;
+            if (
+              m.role === 'assistant' &&
+              ex &&
+              ex.action === 'company_name_candidates' &&
+              !(ex.confirmed === true)
+            ) {
+              next[i] = { ...m, extra: { ...ex, confirmed: true } };
+              break;
+            }
+          }
+          return next;
+        });
+      }
 
       console.log('🚀 useChat.sendMessage 开始, content:', content, 'conversationId:', effectiveConvId, '附件数:', attachments?.length ?? 0);
 
@@ -50,6 +79,8 @@ export function useChat(
       abortControllerRef.current = controller;
 
       // 添加用户消息
+      // silent=true（卡片候选选择）：不插入用户气泡，点击候选后直接进入助手响应，
+      // 避免企业名称/统一信用代码等卡片指令暴露在对话流的 user 部分
       const userMsg: ChatMessage = {
         id: `user-${Date.now()}`,
         role: 'user',
@@ -58,10 +89,12 @@ export function useChat(
         ...(hasAttachments ? { attachments } : {}),
       };
 
-      setMessages((prev) => {
-        console.log('📋 添加用户消息, 之前消息数:', prev.length);
-        return [...prev, userMsg];
-      });
+      if (!silent) {
+        setMessages((prev) => {
+          console.log('📋 添加用户消息, 之前消息数:', prev.length);
+          return [...prev, userMsg];
+        });
+      }
 
       // 添加流式助手消息占位
       const assistantMsgId = `assistant-${Date.now()}`;
@@ -251,30 +284,73 @@ export function useChat(
                     currentOrder: 0,
                     paused: false,
                     text: data.text,
+                    // Phase 1：任务标识（同一意图的管道卡共享同一 frameId）
+                    frameId: data.frameId,
                   };
                   setMessages((prev) => {
                     const next = [...prev];
                     if (data.resume) {
-                      // 恢复路径：更新最后一张任务清单卡片，保留其形态（plan/switch）
-                      // 与进度序号，随后 task_start 会刷新当前任务进度
-                      // plan 取较长者：防御后端恢复路径 plan 缩水（如内存快照丢失后
-                      // 从剩余任务重建），避免任务总数变小、已完成任务行丢失
-                      for (let i = next.length - 1; i >= 0; i--) {
-                        const ex = (next[i] as { extra?: Record<string, unknown> }).extra;
-                        if (ex && ex.action === 'pipeline') {
-                          const prevPlan = (ex as { plan?: PipelineTask[] }).plan ?? [];
-                          next[i] = {
-                            ...next[i],
-                            extra: {
-                              ...newExtra,
-                              plan: prevPlan.length >= data.plan.length ? prevPlan : data.plan,
-                              total: Math.max(data.plan.length, prevPlan.length),
-                              kind: (ex as { kind?: PipelineExtra['kind'] }).kind ?? 'plan',
-                              currentOrder: (ex.currentOrder as number) ?? 0,
-                            },
-                          };
-                          return next;
+                      // 恢复路径（含意图穿插恢复）：优先按 frameId 精确匹配历史任务卡（Phase 1）——
+                      // 同一意图的管道卡共享同一 frameId，可精确锁定被恢复的旧管道卡；
+                      // 升级前旧对话持久化的卡无 frameId，回退 plan 内容匹配
+                      let targetIdx = -1;
+                      if (data.frameId) {
+                        for (let i = next.length - 1; i >= 0; i--) {
+                          const ex = (next[i] as { extra?: Record<string, unknown> }).extra;
+                          if (ex && ex.action === 'pipeline' && ex.frameId === data.frameId) {
+                            targetIdx = i;
+                            break;
+                          }
                         }
+                      }
+                      if (targetIdx === -1) {
+                        // 回退：按 plan 内容匹配历史卡——穿插恢复时对话流最后一张 pipeline 卡是
+                        // 新意图的管道卡（已完成），若按“最后一张”更新会错误修改新管道卡；恢复的
+                        // plan 与旧管道卡的 skill 序列一致，可精确匹配到旧卡（普通暂停恢复时恢复
+                        // plan 与最后一张卡相同，两种策略结果一致，不影响现有行为）
+                        const planKey = data.plan.map((p) => p.skill).join(',');
+                        for (let i = next.length - 1; i >= 0; i--) {
+                          const ex = (next[i] as { extra?: Record<string, unknown> }).extra;
+                          if (ex && ex.action === 'pipeline') {
+                            const prevPlan = (ex as { plan?: PipelineTask[] }).plan ?? [];
+                            if (prevPlan.map((p) => p.skill).join(',') === planKey) {
+                              targetIdx = i;
+                              break;
+                            }
+                          }
+                        }
+                      }
+                      // 回退：找不到匹配卡（如后端恢复路径 plan 缩水）→ 更新最后一张 pipeline 卡
+                      if (targetIdx === -1) {
+                        for (let i = next.length - 1; i >= 0; i--) {
+                          const ex = (next[i] as { extra?: Record<string, unknown> }).extra;
+                          if (ex && ex.action === 'pipeline') {
+                            targetIdx = i;
+                            break;
+                          }
+                        }
+                      }
+                      if (targetIdx !== -1) {
+                        const target = next[targetIdx] as {
+                          extra?: { plan?: PipelineTask[]; kind?: PipelineExtra['kind']; currentOrder?: number };
+                        };
+                        const prevPlan = target.extra?.plan ?? [];
+                        next[targetIdx] = {
+                          ...next[targetIdx],
+                          extra: {
+                            ...newExtra,
+                            // plan 取较长者：防御后端恢复路径 plan 缩水（如内存快照丢失后
+                            // 从剩余任务重建），避免任务总数变小、已完成任务行丢失
+                            plan: prevPlan.length >= data.plan.length ? prevPlan : data.plan,
+                            total: Math.max(data.plan.length, prevPlan.length),
+                            kind: target.extra?.kind ?? 'plan',
+                            currentOrder: target.extra?.currentOrder ?? 0,
+                            // 恢复执行：解除暂停/穿插挂起标记（头部状态文案回到执行中）
+                            waitingConfirm: false,
+                            suspended: false,
+                          },
+                        };
+                        return next;
                       }
                     }
                     // 首次规划：新建卡片消息
@@ -329,6 +405,7 @@ export function useChat(
                       const safeTotal = Math.max(data.total ?? 0, lastEx.total ?? 0, lastEx.plan.length);
                       // 暂停恢复/重试：进度与最后一张卡一致，原地刷新（不产生重复卡）
                       if (lastEx.currentOrder === order) {
+                        // 暂停恢复/重试：解除等待确认标记，回到执行中
                         next[lastIdx] = {
                           ...next[lastIdx],
                           extra: {
@@ -337,6 +414,7 @@ export function useChat(
                             currentOrder: order,
                             paused: false,
                             completed: false,
+                            waitingConfirm: false,
                           },
                         };
                         return next;
@@ -375,7 +453,7 @@ export function useChat(
                           },
                         ];
                       }
-                      // 首个任务：更新初始规划卡
+                      // 首个任务：更新初始规划卡（同时解除暂停/穿插挂起标记）
                       next[lastIdx] = {
                         ...next[lastIdx],
                         extra: {
@@ -388,6 +466,8 @@ export function useChat(
                           currentOrder: order,
                           paused: false,
                           completed: false,
+                          waitingConfirm: false,
+                          suspended: false,
                         },
                       };
                       return next;
@@ -416,22 +496,50 @@ export function useChat(
               break;
 
             case 'pipeline_paused':
-              // 管道暂停（当前任务等待用户补充信息）：仅将卡片标记为暂停状态，
-              // 具体补充提示（如"请上传营业执照图片"）由后端以文本气泡返回，卡片内不重复展示
-              setMessages((prev) => {
-                const next = [...prev];
-                for (let i = next.length - 1; i >= 0; i--) {
-                  const ex = (next[i] as { extra?: Record<string, unknown> }).extra;
-                  if (ex && ex.action === 'pipeline') {
-                    next[i] = {
-                      ...next[i],
-                      extra: { ...ex, paused: true },
-                    };
-                    break;
+              // 管道暂停（当前任务等待用户补充信息/报告生成）：将卡片标记为暂停状态，
+              // 同时把后端透传的 hint（如"请上传营业执照图片"、"报告仍在生成中…"）
+              // 渲染为可见的助手文本气泡——此前 hint 被忽略，穿插恢复等无文本气泡的
+              // 暂停场景用户看不到任何状态说明；去重：info_needed 等场景后端已同时
+              // 发送相同内容的文本气泡，避免重复展示
+              {
+                const pausedData = event.data as { hint?: string } | undefined;
+                const hint = pausedData?.hint?.trim();
+                setMessages((prev) => {
+                  const next = [...prev];
+                  for (let i = next.length - 1; i >= 0; i--) {
+                    const ex = (next[i] as { extra?: Record<string, unknown> }).extra;
+                    if (ex && ex.action === 'pipeline') {
+                      // waitingConfirm：管道暂停等待（模板选择/候选确认/补充信息等），
+                      // 头部文案据此显示"等待确认下一步"；恢复执行（task_start/planning
+                      // resume）时清除
+                      next[i] = {
+                        ...next[i],
+                        extra: { ...ex, paused: true, waitingConfirm: true },
+                      };
+                      break;
+                    }
                   }
-                }
-                return next;
-              });
+                  if (hint) {
+                    let lastText = '';
+                    for (let i = next.length - 1; i >= 0; i--) {
+                      const m = next[i];
+                      if (m.role === 'assistant' && m.content && m.content.trim()) {
+                        lastText = m.content.trim();
+                        break;
+                      }
+                    }
+                    if (lastText !== hint) {
+                      next.push({
+                        id: `hint-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                        role: 'assistant' as const,
+                        content: hint,
+                        created_at: new Date().toISOString(),
+                      });
+                    }
+                  }
+                  return next;
+                });
+              }
               break;
 
             case 'task_done': {
@@ -495,15 +603,115 @@ export function useChat(
               break;
             }
 
+            case 'interrupt_ask':
+              // 意图穿插断点询问：作为独立可见 assistant 卡片消息插入对话流。
+              // 后端负责持久化（assistant 消息 content 为含 action='interrupt_ask' 的 JSON），
+              // 刷新/切换会话后由历史恢复逻辑重新渲染，卡片仍可点击
+              {
+                const data = event.data as unknown as InterruptAskData | undefined;
+                if (data && Array.isArray(data.plan_summary)) {
+                  setMessages((prev) => {
+                    const next = [...prev];
+                    // 被穿插挂起的旧管道卡标记 suspended（头部文案"已挂起（可穿插其他任务）"）：
+                    // 优先按 frameId 精确匹配被挂起卡（Phase 1）；升级前旧卡无 frameId 时回退
+                    // plan_summary 后缀匹配（旧管道卡完整清单 plan 的后缀应与剩余任务序列一致，
+                    // 避免误标新意图自己的管道卡）
+                    const restSkills = data.plan_summary.map((p) => p.skill);
+                    for (let i = next.length - 1; i >= 0; i--) {
+                      const ex = (next[i] as { extra?: Record<string, unknown> }).extra;
+                      if (ex && ex.action === 'pipeline') {
+                        const matched = data.frameId
+                          ? ex.frameId === data.frameId
+                          : (() => {
+                              const planSkills = ((ex as { plan?: PipelineTask[] }).plan ?? []).map((p) => p.skill);
+                              return (
+                                restSkills.length > 0 &&
+                                planSkills.length >= restSkills.length &&
+                                planSkills.slice(planSkills.length - restSkills.length).join(',') ===
+                                  restSkills.join(',')
+                              );
+                            })();
+                        if (matched) {
+                          next[i] = { ...next[i], extra: { ...ex, suspended: true } };
+                        }
+                      }
+                    }
+                    return [
+                      ...next,
+                      {
+                        id: `interrupt-ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                        role: 'assistant' as const,
+                        content: '',
+                        extra: {
+                          action: 'interrupt_ask',
+                          message: data.message,
+                          plan_summary: data.plan_summary,
+                          total: data.total,
+                          // Phase 1：被询问挂起层任务标识（历史恢复后仍可凭 frameId 定位穿插边界）
+                          frameId: data.frameId,
+                          // Phase 6：本次询问交互标识（按钮协议回传，后端日志定位）
+                          interactionId: data.interactionId,
+                        },
+                        created_at: new Date().toISOString(),
+                      },
+                    ];
+                  });
+                }
+              }
+              break;
+
             case 'risk_check_result':
               // 风险预查结果
               upsertCardMessage('风险预查', event.data as unknown as Record<string, unknown>);
               break;
             
-            case 'report_generate_result':
-              // 报告生成结果
-              upsertCardMessage('智能尽调报告生成', event.data as unknown as Record<string, unknown>);
+            case 'report_generate_result': {
+              // 报告生成结果。穿插恢复路径补发（supersede_redirect 标记）与轮询注入共用：
+              // - stage=progress：进度卡 id 固定为 report-progress-${reportId}（与轮询
+              //   injectProgressMessage 一致），移除穿插前旧跳转卡 + 同 report_id 旧进度卡
+              //   后，优先复用当前流式占位（"继续"消息之后），避免"正在思考"占位残留
+              // - stage=redirect 且 supersede_redirect：重发的跳转卡同样取代穿插前旧卡
+              const reportData = (event.data ?? {}) as unknown as Record<string, unknown>;
+              const isSupersede = reportData.supersede_redirect === true;
+              const isProgress = reportData.stage === 'progress';
+              if (isSupersede || isProgress) {
+                const reportId = isProgress ? String(reportData.report_id || '') : '';
+                const cardId =
+                  isProgress && reportId
+                    ? `report-progress-${reportId}`
+                    : `result-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                setMessages((prev) => {
+                  // 1) supersede 语义：移除穿插前段落中的旧跳转卡（已被新卡取代）
+                  const filtered = prev.filter((m) => {
+                    const ex = (m as { extra?: Record<string, unknown> }).extra;
+                    if (ex && ex._skill_name === 'generate_report' && ex.stage === 'redirect') {
+                      return false;
+                    }
+                    return true;
+                  });
+                  // 2) 移除同 report_id 的旧进度卡（允许按正确位置重定位）
+                  const deduped = filtered.filter((m) => m.id !== cardId);
+                  // 3) 优先复用当前流式占位（穿插恢复流无 text_done，占位不消失），否则末尾追加
+                  const idx = deduped.findIndex((m) => isStreamingMessage(m) && m.id === assistantMsgId);
+                  const card = {
+                    role: 'assistant' as const,
+                    content: '',
+                    extra: reportData,
+                    created_at: idx !== -1 ? deduped[idx].created_at : new Date().toISOString(),
+                  };
+                  if (idx !== -1) {
+                    const next = [...deduped];
+                    next[idx] = { id: cardId, ...card };
+                    return next;
+                  }
+                  return [...deduped, { id: cardId, ...card }];
+                });
+                break;
+              }
+              // 其余阶段（templates/upload/generating/done）保持原逻辑
+              upsertCardMessage('智能尽调报告生成', reportData);
               break;
+            }
             
             case 'information_check_result':
               // 信息核实结果
@@ -576,6 +784,41 @@ export function useChat(
                 )
               );
               break;
+
+            case 'stale_action': {
+              // Phase 5（Structured Resume）：结构化恢复协议校验失败（frameId 与栈顶不匹配 /
+              // 无待回答询问）——旧恢复卡点击后给出可见反馈，避免无任何响应
+              const staleData = event.data as unknown as { frameId?: string; message?: string } | undefined;
+              const staleText = staleData?.message || '该任务已失效，请查看最新任务提醒';
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: `stale-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  role: 'assistant' as const,
+                  content: staleText,
+                  created_at: new Date().toISOString(),
+                },
+              ]);
+              break;
+            }
+
+            case 'interaction_suspended': {
+              // Phase 6（交互 ID 化）：结构化交互协议校验失败（frameId 与当前活动帧不匹配——
+              // 卡片所属任务已挂起/完成，Case 14：挂起帧旧卡点击不得污染当前任务）→
+              // 给出可见反馈，避免旧卡点击后无任何响应
+              const suspData = event.data as unknown as { frameId?: string; message?: string } | undefined;
+              const suspText = suspData?.message || '该选择已失效（对应任务已挂起或完成），请查看最新任务提醒';
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: `interaction-suspended-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  role: 'assistant' as const,
+                  content: suspText,
+                  created_at: new Date().toISOString(),
+                },
+              ]);
+              break;
+            }
 
             case 'done':
               console.log('✅ SSE 流完成');

@@ -65,6 +65,10 @@ public final class CompanyNameExtractor {
      *  真实企业名不以这些词结尾（以"有限公司/集团/厂/中心"等结尾），命中视为提取失败 */
     private static final List<String> QUERY_TAIL_RESIDUAL = List.of("基本", "详细", "最新", "完整");
 
+    /** 连接词结尾守卫：以"和/与/及"结尾说明清洗残留了并列连接词（如"查询小米风险和信息"→"小米和"）。
+     *  真实企业名不以连接词结尾，命中视为提取失败回退 LLM 提取 */
+    private static final List<String> CONJUNCTION_TAIL = List.of("和", "与", "及");
+
     /** 直接提取时用于清理的常见动作/语气词（按长度降序使用）。
      *  含口语动词短语（"识别一下"：防止"帮我识别一下风险"残留"识别"）
      *  与量词短语（"给我一份"：防止"给我一份风险报告"因"给"被单独删除而残留"我一 份"） */
@@ -131,6 +135,7 @@ public final class CompanyNameExtractor {
         if (isContextReference(cleaned)) return false;
         if (isGenericCompanyReference(cleaned)) return false;
         if (endsWithAny(cleaned, QUERY_TAIL_RESIDUAL)) return false;
+        if (endsWithAny(cleaned, CONJUNCTION_TAIL)) return false;
         return !containsAny(cleaned, RESIDUAL_ACTION_WORDS);
     }
 
@@ -141,6 +146,47 @@ public final class CompanyNameExtractor {
     public static boolean isValidCreditCode(String code) {
         if (code == null) return false;
         return code.trim().toUpperCase().matches("[0-9A-Z]{18}");
+    }
+
+    // ============================================================
+    // 企业名比对
+    // ============================================================
+
+    /** 企业组织形式后缀（按长度降序，用于剥离后比较核心名） */
+    private static final List<String> COMPANY_SUFFIXES = List.of(
+            "股份有限公司", "有限责任公司", "集团有限公司", "有限公司", "公司");
+
+    /**
+     * 同一企业判定（上下文企业名 vs 任务/参数企业名）：
+     * - 任一侧为空视为同一（不构成"换了企业"的证据，宽松补全语义，与原 contains 双向判断一致）
+     * - 直接包含比较（含相等）命中视为同一
+     * - 剥离企业组织形式后缀（"股份有限公司/有限责任公司/有限公司/公司"等）后比较核心名
+     *   相等或包含，解决简称/全称互不包含导致补全/刷新被跳过的问题
+     *   （如"小米科技有限责任公司".contains("小米科技公司") = false）
+     */
+    public static boolean isSameCompany(String ctxName, String taskName) {
+        if (ctxName == null || ctxName.isEmpty() || taskName == null || taskName.isEmpty()) {
+            return true;
+        }
+        String a = ctxName.trim();
+        String b = taskName.trim();
+        if (a.equals(b) || a.contains(b) || b.contains(a)) {
+            return true;
+        }
+        String coreA = stripCompanySuffix(a);
+        String coreB = stripCompanySuffix(b);
+        return coreA.equals(coreB) || coreA.contains(coreB) || coreB.contains(coreA);
+    }
+
+    /** 剥离企业组织形式后缀（"北京小米科技有限公司" → "北京小米科技"）；剥离后无有效核心名（<2 字）时返回原名 */
+    private static String stripCompanySuffix(String name) {
+        for (String suffix : COMPANY_SUFFIXES) {
+            if (name.endsWith(suffix)) {
+                String core = name.substring(0, name.length() - suffix.length()).trim();
+                return core.length() >= 2 ? core : name;
+            }
+        }
+        return name;
     }
 
     // ============================================================

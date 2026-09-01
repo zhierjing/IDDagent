@@ -9,7 +9,7 @@ interface ReportGenerateCardProps {
 
 /** 获取后端 H5 页面 URL */
 function getBaseH5Url(): string {
-  const port = window.location.port === '3000' ? '8000' : window.location.port;
+  const port = window.location.port === '5173' ? '8081' : window.location.port;
   return `${window.location.protocol}//${window.location.hostname}:${port}/h5/report-viewer.html`;
 }
 
@@ -391,12 +391,19 @@ const ReportGenerateCard: React.FC<ReportGenerateCardProps> = ({ data, onSendMes
         templates={templates}
         organization={data.organization as string || getStoredOrganization()}
         onSelect={(t) => {
-          // 向后端发送固定格式模板选择消息（【模板选择】<template_id>）：
-          // generate_report 展示模板列表后以 pendingSkill 等待此消息，后端解析注入
-          // template_id 重入技能返回跳转信息并推进任务完成状态。此前本地生成跳转卡
-          // 或走 LLM 提取模板 ID，多意图管道不感知模板选择，任务被误判为已完成
+          // 向后端发送模板选择消息（Phase 6：结构化交互协议 select_template + frameId/
+          // interactionId，后端校验帧归属后转发【模板选择】<template_id> 重入技能注入
+          // template_id 返回跳转信息并推进任务完成状态；旧卡无 frameId 时回退文本协议）。
+          // 此前本地生成跳转卡或走 LLM 提取模板 ID，多意图管道不感知模板选择，任务被误判为已完成
           if (onSendMessage) {
-            onSendMessage(`【模板选择】${t.id}`);
+            const selectText = `【模板选择】${t.id}`
+            const frameId = data.frameId as string | undefined
+            const interactionId = data.interactionId as string | undefined
+            onSendMessage(
+              frameId && interactionId
+                ? JSON.stringify({ action: 'select_template', frameId, interactionId, input: selectText })
+                : selectText
+            )
           } else if (onAddMessage) {
             // fallback：无发送通道时本地生成跳转卡（仅渲染，不参与管道进度）
             onAddMessage({

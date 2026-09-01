@@ -1,12 +1,13 @@
 import React from 'react'
 import type { RiskAmbiguousOption } from '../types'
+import CompanyCandidatePanel from './CompanyCandidatePanel'
 
 // ============================================================
 // Props
 // ============================================================
 interface RiskCheckCardProps {
   data: Record<string, unknown>
-  onSendMessage?: (content: string) => void
+  onSendMessage?: (content: string, silent?: boolean) => void
 }
 
 // ============================================================
@@ -14,148 +15,59 @@ interface RiskCheckCardProps {
 // ============================================================
 const RiskCheckCard: React.FC<RiskCheckCardProps> = ({ data, onSendMessage }) => {
   const action = data.action as string | undefined
+  const options = data.options as RiskAmbiguousOption[] | undefined
+  const keyword = data.keyword as string || ''
 
-  // ========== 未找到 ==========
-  if (action === 'not_found') {
-    const options = data.options as RiskAmbiguousOption[] | undefined
-    return (
-      <div className="risk-check-card bg-gradient-to-br from-gray-50 to-slate-50 rounded-xl border border-gray-200 overflow-hidden">
-        <div className="p-4">
-          <p className="text-gray-500 text-sm text-center">
-            {(data.message as string) || '未找到相关企业信息'}
-          </p>
-        </div>
-        {options && options.length > 0 && (
-          <div className="px-3 pb-3 space-y-2">
-            {options.map((opt) => (
-              <button
-                key={opt.credit_code}
-                onClick={() =>
-                  onSendMessage?.(
-                    `查询统一信用代码为${opt.credit_code}的客户的风险`
-                  )
-                }
-                className="w-full text-left px-4 py-3 rounded-lg border border-amber-200 bg-white
-                           hover:bg-amber-50 hover:border-amber-300 transition-all
-                           flex items-center justify-between group cursor-pointer"
-              >
-                <div>
-                  <div className="text-sm font-medium text-gray-800 group-hover:text-amber-700">
-                    {opt.company_name}
-                  </div>
-                  <div className="text-xs text-gray-400 font-mono mt-0.5">
-                    {opt.credit_code}
-                  </div>
-                </div>
-                <svg className="w-4 h-4 text-amber-400 group-hover:text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-              </button>
-            ))}
-            <button
-              onClick={() => onSendMessage?.('以上都不是')}
-              className="w-full px-4 py-3 rounded-lg border border-dashed border-gray-300 bg-white/60
-                         hover:bg-gray-100 hover:border-gray-400 transition-all
-                         flex items-center justify-center gap-1.5 group cursor-pointer"
-            >
-              <span className="text-sm text-gray-500 group-hover:text-gray-700">以上都不是</span>
-            </button>
-          </div>
-        )}
-      </div>
+  // 候选点击：直接查询该企业风险（静默发送，不展示企业名/信用代码于 user 气泡）。
+  // Phase 6：优先发送结构化交互协议（select_candidate + frameId/interactionId，
+  // 后端校验帧归属——挂起帧旧卡点击被拒）；旧卡无 frameId 时回退文本查询句
+  const handleSelect = (opt: RiskAmbiguousOption) => {
+    const queryText = `查询统一信用代码为${opt.credit_code}的客户的风险`
+    const frameId = data.frameId as string | undefined
+    const interactionId = data.interactionId as string | undefined
+    onSendMessage?.(
+      frameId && interactionId
+        ? JSON.stringify({ action: 'select_candidate', frameId, interactionId, input: queryText })
+        : queryText,
+      true
     )
   }
 
-  // ========== 名称歧义 ==========
-  if (action === 'ambiguous') {
-    const options = data.options as RiskAmbiguousOption[] | undefined
-    const keyword = data.keyword as string || ''
-
+  // ========== 未找到：空态卡片（无"以上都不是"选项） ==========
+  if (action === 'not_found') {
     return (
-      <div className="risk-check-card bg-gradient-to-br from-amber-50 to-yellow-50 rounded-xl border border-amber-200 overflow-hidden">
-        <div className="px-4 py-3 border-b border-amber-100 bg-white/60">
-          <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-            <span className="text-lg">🔍</span>
-            请确认要查询的企业
-          </h3>
-          <p className="text-xs text-gray-500 mt-1">
-            搜索到 {options?.length || 0} 家名称包含"{keyword}"的企业
-          </p>
-        </div>
-        <div className="p-3 space-y-2">
-          {options?.map((opt) => (
-            <button
-              key={opt.credit_code}
-              onClick={() =>
-                onSendMessage?.(
-                  `查询统一信用代码为${opt.credit_code}的客户的风险`
-                )
-              }
-              className="w-full text-left px-4 py-3 rounded-lg border border-amber-200 bg-white
-                         hover:bg-amber-50 hover:border-amber-300 transition-all
-                         flex items-center justify-between group cursor-pointer"
-            >
-              <div>
-                <div className="text-sm font-medium text-gray-800 group-hover:text-amber-700">
-                  {opt.company_name}
-                </div>
-                <div className="text-xs text-gray-400 font-mono mt-0.5">
-                  {opt.credit_code}
-                </div>
-              </div>
-              <svg className="w-4 h-4 text-amber-400 group-hover:text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
-            </button>
-          ))}
-          <button
-            onClick={() => onSendMessage?.('以上都不是')}
-            className="w-full px-4 py-3 rounded-lg border border-dashed border-gray-300 bg-white/60
-                       hover:bg-gray-100 hover:border-gray-400 transition-all
-                       flex items-center justify-center gap-1.5 group cursor-pointer"
-          >
-            <span className="text-sm text-gray-500 group-hover:text-gray-700">以上都不是</span>
-          </button>
-        </div>
-      </div>
+      <CompanyCandidatePanel
+        variant="not_found"
+        title="风险预查"
+        options={options}
+        notFoundMessage={(data.message as string) || '未找到相关企业信息'}
+        onSelect={handleSelect}
+      />
+    )
+  }
+
+  // ========== 名称歧义：候选确认卡片 ==========
+  if (action === 'ambiguous') {
+    return (
+      <CompanyCandidatePanel
+        variant="ambiguous"
+        title="风险预查"
+        keyword={keyword}
+        options={options}
+        onSelect={handleSelect}
+        onNoneOfAbove={() => onSendMessage?.('以上都不是')}
+      />
     )
   }
 
   // ========== 风险结果 ==========
   const companyName = data.company_name as string || ''
   const creditCode = data.credit_code as string || ''
-  const riskLevel = data.risk_level as string || 'low'
   const riskSummary = data.risk_summary as string || ''
   const h5Url = data.h5_url as string || ''
 
-  const levelConfig: Record<string, { label: string; bg: string; text: string; border: string; icon: string }> = {
-    high: {
-      label: '高风险',
-      bg: 'from-red-50 to-rose-50',
-      text: 'text-red-700',
-      border: 'border-red-200',
-      icon: '🔴',
-    },
-    medium: {
-      label: '中等风险',
-      bg: 'from-amber-50 to-yellow-50',
-      text: 'text-amber-700',
-      border: 'border-amber-200',
-      icon: '🟡',
-    },
-    low: {
-      label: '低风险',
-      bg: 'from-emerald-50 to-green-50',
-      text: 'text-emerald-700',
-      border: 'border-emerald-200',
-      icon: '🟢',
-    },
-  }
-
-  const config = levelConfig[riskLevel] || levelConfig.low
-
   return (
-    <div className={`risk-check-card bg-gradient-to-br ${config.bg} rounded-xl border ${config.border} overflow-hidden`}>
+    <div className="risk-check-card bg-gradient-to-br from-blue-50 to-sky-50 rounded-xl border border-blue-200 overflow-hidden">
       {/* 头部 */}
       <div className="px-4 py-3 border-b border-white/40 bg-white/30">
         <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
@@ -173,15 +85,7 @@ const RiskCheckCard: React.FC<RiskCheckCardProps> = ({ data, onSendMessage }) =>
           <div className="text-xs text-gray-400 font-mono">信用代码：{creditCode}</div>
         </div>
 
-        {/* 风险等级 */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500">风险等级：</span>
-          <span className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm font-bold ${config.text} bg-white/70`}>
-            {config.icon} {config.label}
-          </span>
-        </div>
-
-        {/* 风险结论 */}
+        {/* 风险结论（大模型摘要） */}
         <div className="bg-white/70 rounded-lg p-3 border-l-2 border-blue-400">
           <p className="text-sm text-gray-700 leading-relaxed">
             💡 {riskSummary}

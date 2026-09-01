@@ -1,6 +1,6 @@
 // 死循环修复验证脚本：模拟用户输入序列，检查不再弹卡片死循环
 const TOKEN = process.env.TOKEN;
-const BASE = 'http://localhost:8000/api';
+const BASE = 'http://localhost:8081/api';
 
 async function chat(message, conversationId) {
   const res = await fetch(`${BASE}/chat/stream`, {

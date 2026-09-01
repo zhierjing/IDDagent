@@ -1,5 +1,6 @@
 import React from 'react'
 import type { HistoricalDDReport } from '../types'
+import CompanyCandidatePanel from './CompanyCandidatePanel'
 
 interface HistoricalDDQueryCardProps {
   data: Record<string, unknown>
@@ -13,16 +14,16 @@ const HistoricalDDQueryCard: React.FC<HistoricalDDQueryCardProps> = ({ data }) =
   const totalCount = (data.total_count as number) || 0
   const records = (data.records as HistoricalDDReport[]) || []
   const message = (data.message as string) || ''
-  const BACKEND_URL = 'http://localhost:8000'
+  const BACKEND_URL = 'http://localhost:8081'
 
-  // ========== 未找到 ==========
+  // ========== 未找到：空态卡片（无候选选项） ==========
   if (action === 'not_found') {
     return (
-      <div className="bg-gradient-to-br from-gray-50 to-slate-50 rounded-xl border border-gray-200 overflow-hidden">
-        <div className="p-4">
-          <p className="text-gray-500 text-sm text-center">{message || '未查询到相关历史尽调报告'}</p>
-        </div>
-      </div>
+      <CompanyCandidatePanel
+        variant="not_found"
+        title="历史尽调报告"
+        notFoundMessage={message || '未查询到相关历史尽调报告'}
+      />
     )
   }
 

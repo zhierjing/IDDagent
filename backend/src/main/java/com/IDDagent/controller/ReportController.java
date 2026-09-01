@@ -1,5 +1,6 @@
 package com.IDDagent.controller;
 
+import com.IDDagent.service.ContextMemoryService;
 import com.IDDagent.service.FileParserService;
 import com.IDDagent.service.LLMFieldExtractor;
 import com.IDDagent.service.ReportStoreService;
@@ -34,6 +35,7 @@ public class ReportController {
     private final ReportTaskStore taskStore;
     private final FileParserService fileParser;
     private final LLMFieldExtractor llmFieldExtractor;
+    private final ContextMemoryService contextMemoryService;
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final Path UPLOAD_DIR = Paths.get("data", "uploads", "report-files");
 
@@ -52,10 +54,12 @@ public class ReportController {
     }
 
     public ReportController(ReportTaskStore taskStore, FileParserService fileParser,
-                            LLMFieldExtractor llmFieldExtractor) {
+                            LLMFieldExtractor llmFieldExtractor,
+                            ContextMemoryService contextMemoryService) {
         this.taskStore = taskStore;
         this.fileParser = fileParser;
         this.llmFieldExtractor = llmFieldExtractor;
+        this.contextMemoryService = contextMemoryService;
         try { Files.createDirectories(UPLOAD_DIR); } catch (Exception ignored) {}
     }
 
@@ -155,6 +159,13 @@ public class ReportController {
 
         ReportTask task = taskStore.createTask(templateId, templateName, companyName,
                 creditCode, userId, sourceFile, organization, conversationId, attachmentNames, attachmentFileIds);
+
+        // v4：报告任务已创建 → 把 report_id 写回 waitingReportTask（若该对话存在挂起的
+        // 报告任务），供穿插恢复时区分"报告任务未创建"（用户跳转 H5 后未生成即关闭）
+        // 与"报告仍在生成"两种状态，避免恢复后管道永久挂起
+        if (!conversationId.isEmpty()) {
+            contextMemoryService.setWaitingReportId(conversationId, task.getReportId());
+        }
 
         // 在 boundedElastic 线程中阻塞解析 LLM，不阻塞 Netty 事件循环
         return Mono.fromCallable(() -> {
@@ -325,10 +336,11 @@ public class ReportController {
         return ResponseEntity.ok(result);
     }
 
-    /** 获取用户活跃报告（供聊天页轮询进度卡片） */
+    /** 获取用户活跃报告（供聊天页轮询进度卡片：生成中 + 最近 10 分钟刚完成/失败的任务，
+     *  使同步生成的报告（2ms 即完成）也能被 3s 轮询捕获；conversationId 供前端推进挂起管道） */
     @GetMapping(value = "/user/{userId}/active", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> getActiveReports(@PathVariable String userId) {
-        List<ReportTask> activeTasks = taskStore.getActiveTasksByUser(userId);
+        List<ReportTask> activeTasks = taskStore.getRecentTasksByUser(userId, 10);
         List<Map<String, Object>> reports = activeTasks.stream().map(task -> {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("reportId", task.getReportId());
@@ -337,6 +349,7 @@ public class ReportController {
             item.put("companyName", task.getCompanyName());
             item.put("progress", task.getProgress());
             item.put("createdAt", task.getCreatedAt().toString());
+            item.put("conversationId", task.getConversationId());
             return item;
         }).toList();
         Map<String, Object> result = new LinkedHashMap<>();

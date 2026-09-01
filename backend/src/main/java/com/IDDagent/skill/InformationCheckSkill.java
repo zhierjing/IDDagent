@@ -67,7 +67,7 @@ public class InformationCheckSkill {
             Map<String, String> nameIndex = (Map<String, String>) (Map<?, ?>) DataLoader.loadJson(NAME_INDEX_FILE);
             Map<String, Object> resolved = RiskCheckSkill.resolveCompanyMatch(companyName, nameIndex);
 
-            // ambiguous（多匹配）或 not_found（有相似企业）直接返回给前端
+            // ambiguous（带 options 候选）直接返回给前端（not_found 仅无任何匹配，由前端空态卡展示）
             if (resolved.containsKey("action")) {
                 return resolved;
             }
@@ -90,7 +90,11 @@ public class InformationCheckSkill {
         if (attachmentUrl.isEmpty()) {
             Map<String, Object> resp = new HashMap<>();
             resp.put("action", "info_needed");
-            resp.put("message", "请上传该企业的营业执照图片以进行信息核实。");
+            // 文案携带目标企业名：防止穿插场景下用户误传其他企业的附件被当作目标企业
+            // 执照核实（如任务仍核实"小米科技"却上传"星河科技.PNG"）；无企业名时回退原文案
+            resp.put("message", companyName.isEmpty()
+                    ? "请上传该企业的营业执照图片以进行信息核实。"
+                    : "请上传【" + companyName + "】的营业执照图片以进行信息核实。");
             // 带回已解析的企业信息，供 ChatController 合并进技能上下文，避免下一轮参数丢失
             resp.put("company_name", companyName);
             resp.put("credit_code", creditCode);

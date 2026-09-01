@@ -8,7 +8,7 @@
 //   node scripts/evaluate-intent.mjs [options]
 //
 // 选项:
-//   --base-url <url>        后端地址，默认 http://localhost:8000
+//   --base-url <url>        后端地址，默认 http://localhost:8081
 //   --username <name>       登录已有账号（与 --password 一起传）
 //   --password <pwd>        密码
 //   --bank <name>           银行机构（登录/注册用），默认 "评测用"
@@ -30,7 +30,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 // ---------- CLI 参数 ----------
 const args = process.argv.slice(2);
-const opt = { baseUrl: 'http://localhost:8000', concurrency: 3, timeout: 90000,
+const opt = { baseUrl: 'http://localhost:8081', concurrency: 3, timeout: 90000,
               bank: '评测用', testset: join(ROOT, 'backend/src/test/resources/intent_testset.json'),
               outDir: join(ROOT, 'scripts/eval-output'), abort: true };
 for (let i = 0; i < args.length; i++) {
@@ -53,7 +53,7 @@ for (let i = 0; i < args.length; i++) {
       console.log(`意图识别准确率评测脚本
 
 用法: node scripts/evaluate-intent.mjs [options]
-  --base-url <url>        后端地址（默认 http://localhost:8000）
+  --base-url <url>        后端地址（默认 http://localhost:8081）
   --username <name>       登录已有账号（与 --password 一起传；不传则自动注册临时账号）
   --password <pwd>        密码
   --bank <name>           银行机构（默认 "评测用"）
@@ -130,7 +130,7 @@ function parseExpected(expected) {
  *           | { type: 'multi', skills } | { type: 'skill-unknown' }
  *           | { type: 'skill-unknown-multi', skills } | { type: 'unknown' }
  */
-async function sendAndInfer(message, token) {
+async function sendAndInfer(message, token, conversationId = null) {
   const events = [];
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), opt.timeout);
@@ -167,7 +167,7 @@ async function sendAndInfer(message, token) {
     const res = await fetch(`${opt.baseUrl}/api/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ message, conversationId: null }),
+      body: JSON.stringify({ message, conversationId }),
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -273,18 +273,27 @@ async function evaluate() {
     while (cursor < cases.length) {
       const idx = cursor++;
       const c = cases[idx];
-      const convId = `${c.id}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
       try {
         // context 用例：先在同一会话发送前置消息（prelude），让上下文记忆生效
+        // 首条 prelude 创建会话后，从 SSE 事件提取真实 conversation_id 供后续复用
+        let convId = null;
         if (Array.isArray(c.prelude) && c.prelude.length > 0) {
           for (const p of c.prelude) {
-            await sendAndInfer(p, token);
+            const r = await sendAndInfer(p, token, convId);
+            if (!convId) {
+              for (const e of r.events) {
+                if (e.conversation_id) { convId = e.conversation_id; break; }
+              }
+            }
           }
         }
-        const { decision, events } = await sendAndInfer(c.input, token);
+        const t0 = performance.now();
+        const { decision, events } = await sendAndInfer(c.input, token, convId);
+        const durationMs = Math.round(performance.now() - t0);
         const hit = isHit(c.expected, decision);
         results.push({ id: c.id, input: c.input, expected: c.expected, level: c.level,
-          category: c.category, note: c.note || '', hit, actual: decision, events });
+          category: c.category, note: c.note || '', hit, actual: decision,
+          duration_ms: durationMs, events });
         process.stdout.write(`  [${results.length}/${cases.length}] ${c.id} ${hit ? '✓' : '✗'} expected=${c.expected} actual=${actualLabel(decision)}\n`);
       } catch (err) {
         results.push({ id: c.id, input: c.input, expected: c.expected, level: c.level,
@@ -303,6 +312,24 @@ async function evaluate() {
   const hits = results.filter(r => r.hit).length;
   const misses = results.filter(r => !r.hit).length;
   const reviews = results.filter(needReview).length;
+
+  // 意图识别耗时统计：per-case 从发请求到 SSE 出现决策信号（abort 提前中断，恰为用户感知延迟）
+  const durStats = (list) => {
+    const d = list.map(r => r.duration_ms).sort((a, b) => a - b);
+    if (d.length === 0) return { count: 0 };
+    const q = (p) => d[Math.min(d.length - 1, Math.max(0, Math.floor(p * d.length)))];
+    return {
+      count: d.length,
+      avg_ms: Math.round(d.reduce((a, b) => a + b, 0) / d.length),
+      p50_ms: q(0.5), p95_ms: q(0.95), max_ms: d[d.length - 1],
+    };
+  };
+  const duration = durStats(results);
+  const durationByLevel = {};
+  for (const lv of [...new Set(results.map(r => r.level))]) {
+    durationByLevel[lv] = durStats(results.filter(r => r.level === lv));
+  }
+  const durationByHit = { hit: durStats(results.filter(r => r.hit)), miss: durStats(results.filter(r => !r.hit)) };
 
   const pct = (n, d) => d === 0 ? '-' : `${(100 * n / d).toFixed(1)}%`;
   const groupBy = (key) => {
@@ -340,7 +367,9 @@ async function evaluate() {
       eval_target: raw.metadata.eval_target,
     },
     summary: { total: results.length, hit: hits, miss: misses, accuracy: pct(hits, results.length),
-               need_review: reviews },
+               need_review: reviews, duration },
+    duration_by_level: durationByLevel,
+    duration_by_hit: durationByHit,
     by_level: byLevel, by_category: byCategory, by_skill: bySkill,
     confusion: confRows.map(exp => ({ expected: exp, row: confCols.map(col => ({ actual: col, count: confMap.get(`${exp}||${col}`) || 0 })) })),
     need_review_list: results.filter(needReview).map(r => ({ id: r.id, input: r.input, expected: r.expected, actual: actualLabel(r.actual), note: r.note })),
@@ -358,8 +387,17 @@ async function evaluate() {
   L(`时间: ${timestamp} | 后端: ${opt.baseUrl} | 用例: ${report.summary.total}`);
   L(`整体准确率: ${report.summary.hit}/${report.summary.total} = ${report.summary.accuracy}`);
   L(`未命中: ${report.summary.miss} | 需人工复核: ${report.summary.need_review}`);
+  L(`意图识别耗时: avg=${report.summary.duration.avg_ms}ms p50=${report.summary.duration.p50_ms}ms `
+    + `p95=${report.summary.duration.p95_ms}ms max=${report.summary.duration.max_ms}ms`);
   L('\n--- 分难度 ---');
   for (const g of byLevel) L(`  ${g.key.padEnd(7)} ${g.hit}/${g.total} = ${g.acc}`);
+  L('\n--- 耗时按难度 ---');
+  for (const [lv, d] of Object.entries(durationByLevel)) {
+    L(`  ${lv.padEnd(7)} avg=${d.avg_ms}ms p95=${d.p95_ms}ms max=${d.max_ms}ms (n=${d.count})`);
+  }
+  L('\n--- 耗时按命中 ---');
+  L(`  命中: avg=${durationByHit.hit.avg_ms}ms p95=${durationByHit.hit.p95_ms}ms (n=${durationByHit.hit.count})`);
+  L(`  未命中: avg=${durationByHit.miss.avg_ms}ms p95=${durationByHit.miss.p95_ms}ms (n=${durationByHit.miss.count})`);
   L('\n--- 分类型 ---');
   for (const g of byCategory) L(`  ${g.key.padEnd(18)} ${g.hit}/${g.total} = ${g.acc}`);
   L('\n--- 分技能 (expected=技能名) ---');
@@ -404,6 +442,27 @@ function buildMarkdown(report) {
   md.push(`| 未命中 | ${report.summary.miss} |`);
   md.push(`| 整体准确率 | ${report.summary.accuracy} |`);
   md.push(`| 需人工复核 | ${report.summary.need_review} |\n`);
+  const d = report.summary.duration;
+  md.push('## 意图识别耗时\n');
+  md.push('> 口径：单条用例从发送请求到 SSE 出现决策信号（提前中断），即用户可感知的意图识别延迟。\n');
+  md.push('| 指标 | 值 |');
+  md.push('| --- | --- |');
+  md.push(`| 平均耗时 | ${d.avg_ms}ms |`);
+  md.push(`| P50 | ${d.p50_ms}ms |`);
+  md.push(`| P95 | ${d.p95_ms}ms |`);
+  md.push(`| 最大 | ${d.max_ms}ms |\n`);
+  md.push('### 按难度\n');
+  md.push('| 难度 | 用例数 | 平均 | P95 | 最大 |\n| --- | --- | --- | --- | --- |');
+  for (const [lv, x] of Object.entries(report.duration_by_level)) {
+    md.push(`| ${lv} | ${x.count} | ${x.avg_ms}ms | ${x.p95_ms}ms | ${x.max_ms}ms |`);
+  }
+  md.push('');
+  md.push('### 按命中\n');
+  md.push('| 结果 | 用例数 | 平均 | P95 |\n| --- | --- | --- | --- |');
+  for (const [k, x] of Object.entries(report.duration_by_hit)) {
+    md.push(`| ${k} | ${x.count} | ${x.avg_ms}ms | ${x.p95_ms}ms |`);
+  }
+  md.push('');
   md.push('## 分难度准确率\n');
   md.push('| 难度 | 用例数 | 命中 | 准确率 |\n| --- | --- | --- | --- |');
   md.push(rows(report.by_level) + '\n');

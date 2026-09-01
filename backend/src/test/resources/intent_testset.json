@@ -1,11 +1,11 @@
 {
   "metadata": {
     "name": "意图识别准确率测试集",
-    "version": "1.0",
+    "version": "1.2",
     "created": "2026-08-12",
-    "total": 203,
+    "total": 217,
     "eval_target": "CoordinatorService.routeIntent 决策输出（action + skill），与 expected 一致即命中",
-    "expected_format": "单意图=技能名；chat=chat；clarify=clarify；multi=multi[技能1,技能2,...]（顺序敏感）",
+    "expected_format": "单意图=技能名；chat=chat（含'业务暂未开通'提示场景）；clarify=clarify；multi=multi[技能1,技能2,...]（顺序敏感）",
     "level_spec": "easy=确定性直接命中；medium=口语化/泛化/上下文指代（多依赖 LLM 兜底）；hard=跨组冲突/歧义/对抗缺陷点",
     "skills_under_test": [
       "check_company_risk", "query_company_basic_info", "query_shareholder_info",
@@ -14,7 +14,11 @@
       "query_pboc_account_control", "verify_business_license", "generate_report",
       "query_due_diligence_reports"
     ],
-    "note": "context 类用例需配合指定前置消息执行（见 note 字段）；adversarial 类含系统已知缺陷点，命中失败不一定是回归，需人工复核"
+    "note": "context 类用例需配合指定前置消息执行（见 note 字段）；adversarial 类含系统已知缺陷点，命中失败不一定是回归，需人工复核；clarify 类用例在 v1.1 全部保留，语义为'存在多种合理解读时系统应澄清'，触发路径：多候选仲裁规则 3 / 唯一候选低置信度转澄清 / LLM 兜底规则 1（意图不明但有多解读）",
+    "changelog": [
+      "v1.1: 14 条 clarify 用例全部保留（架构补强：LLM 兜底规则 1 增加 clarify 输出、规则 16 增加企业对象条件）；VER-003 由 verify_business_license 修订为 clarify（核实对象不明）；ADV-001/002 note 更新（树层命中 query_risk_score 预留叶子，未开通 chat 与 expected 一致）；ADV-003 保留 clarify 语义（现状为未开通 chat，已知取舍）；新增 NEW-001~013 覆盖 matchable 未开通 / 预留叶子未开通 / 黑名单互斥新特性",
+      "v1.2: 6 条 generic verify 用例修订为 clarify（VER-004/005、VER-009、MUL-001/010/012）——'核实/信息核实'无核实对象时不再硬映射 verify_business_license，语义对齐核实对象不明场景"
+    ]
   },
   "cases": [
     {
@@ -300,13 +304,13 @@
       "id": "VER-002", "input": "营业执照核验", "expected": "verify_business_license", "level": "easy", "category": "verify", "note": "命中'营业执照核验'"
     },
     {
-      "id": "VER-003", "input": "信息核查一下北京星河科技", "expected": "verify_business_license", "level": "easy", "category": "verify", "note": "命中'信息核查'"
+      "id": "VER-003", "input": "信息核查一下北京星河科技", "expected": "clarify", "level": "easy", "category": "verify", "note": "核实对象不明（营业执照/身份/通讯？）→ 期望澄清；v1.1 由 verify_business_license 修订"
     },
     {
-      "id": "VER-004", "input": "核实一下", "expected": "verify_business_license", "level": "easy", "category": "verify", "note": "仅关键词，唯一候选直接路由，参数后补 info_needed"
+      "id": "VER-004", "input": "核实一下", "expected": "clarify", "level": "easy", "category": "verify", "note": "仅行为词无核实对象（营业执照/身份/通讯？）→ 期望澄清；v1.2 由 verify_business_license 修订"
     },
     {
-      "id": "VER-005", "input": "上传的附件帮我核实一下", "expected": "verify_business_license", "level": "medium", "category": "verify", "note": "附件+用途关键词'核实'"
+      "id": "VER-005", "input": "上传的附件帮我核实一下", "expected": "clarify", "level": "medium", "category": "verify", "note": "附件+核实但类型不明，不默认等于营业执照 → 期望澄清；v1.2 修订"
     },
     {
       "id": "VER-006", "input": "核实营业执照和公司信息", "expected": "verify_business_license", "level": "easy", "category": "verify", "note": "命中'核实'；'公司信息'不触发 basic（无查询行为词）"
@@ -318,7 +322,7 @@
       "id": "VER-008", "input": "小米科技的营业执照是真实的吗", "expected": "verify_business_license", "level": "hard", "category": "verify", "note": "无核实类关键词，依赖 LLM 兜底语义泛化"
     },
     {
-      "id": "VER-009", "input": "信息核实并做风险识别", "expected": "multi[verify_business_license,check_company_risk]", "level": "hard", "category": "multi", "note": "跨组候选 → LLM 仲裁输出 multi"
+      "id": "VER-009", "input": "信息核实并做风险识别", "expected": "clarify", "level": "hard", "category": "multi", "note": "风险部分明确但'信息核实'对象不明（generic verify 不硬映射营业执照）→ 期望澄清；v1.2 由 multi 修订"
     },
     {
       "id": "VER-010", "input": "核查一下深圳前海创新金融集团的营业执照", "expected": "verify_business_license", "level": "easy", "category": "verify", "note": "命中'核查'"
@@ -480,7 +484,10 @@
       "id": "CLR-012", "input": "帮我评估一下小米科技", "expected": "clarify", "level": "hard", "category": "clarify", "note": "'评估'不命中任何技能 → 期望澄清"
     },
     {
-      "id": "MUL-001", "input": "核实小米科技的信息并做风险识别", "expected": "multi[verify_business_license,check_company_risk]", "level": "hard", "category": "multi", "note": "双意图：核实+风险"
+      "id": "CLR-013", "input": "查询海关信息", "expected": "clarify", "level": "hard", "category": "clarify", "note": "海关上义词'海关'同时触发 auth 与 blacklist（同组平票）→ 仲裁输出澄清，弹'海关认证信息/海关失信名单信息'卡片"
+    },
+    {
+      "id": "MUL-001", "input": "核实小米科技的信息并做风险识别", "expected": "clarify", "level": "hard", "category": "multi", "note": "同 VER-009：'核实信息'对象不明 → 期望澄清；v1.2 由 multi 修订"
     },
     {
       "id": "MUL-002", "input": "查一下小米科技的股东和受益人", "expected": "multi[query_shareholder_info,query_beneficiary_info]", "level": "hard", "category": "multi", "note": "query 组平票 → 仲裁 multi"
@@ -507,13 +514,13 @@
       "id": "MUL-009", "input": "查股东、受益人还有企业族谱", "expected": "multi[query_shareholder_info,query_beneficiary_info,query_company_genealogy]", "level": "hard", "category": "multi", "note": "三意图 multi"
     },
     {
-      "id": "MUL-010", "input": "信息核实和基本信息查询", "expected": "multi[verify_business_license,query_company_basic_info]", "level": "hard", "category": "multi", "note": "跨组 multi"
+      "id": "MUL-010", "input": "信息核实和基本信息查询", "expected": "clarify", "level": "hard", "category": "multi", "note": "basic 明确但'信息核实'对象不明 → 期望澄清；v1.2 由 multi 修订"
     },
     {
       "id": "MUL-011", "input": "查一下小米科技的基本信息和风险", "expected": "multi[query_company_basic_info,check_company_risk]", "level": "hard", "category": "multi", "note": "对抗点：basic 被'风险'排除词否决 → 确定性层实际仅剩 risk，expected 按完整语义标注"
     },
     {
-      "id": "MUL-012", "input": "帮我核实信息并查一下历史尽调报告", "expected": "multi[verify_business_license,query_due_diligence_reports]", "level": "hard", "category": "multi", "note": "跨组 multi"
+      "id": "MUL-012", "input": "帮我核实信息并查一下历史尽调报告", "expected": "clarify", "level": "hard", "category": "multi", "note": "'核实信息'不能推出营业执照核实 → 期望澄清；v1.2 由 multi 修订"
     },
     {
       "id": "MUL-013", "input": "查授信和海关认证", "expected": "multi[query_credit_granting,query_customs_auth]", "level": "hard", "category": "multi", "note": "跨组 multi"
@@ -555,13 +562,13 @@
       "id": "CTX-010", "input": "把刚才那家的账户管控也查一下", "expected": "query_pboc_account_control", "level": "medium", "category": "context", "note": "前置：小米科技；命中'账户管控'", "prelude": ["查询小米科技的基本信息"]
     },
     {
-      "id": "ADV-001", "input": "风险打分", "expected": "chat", "level": "hard", "category": "adversarial", "note": "排除词'打分'否决 risk → 确定性层无候选 → LLM 兜底规则2强制 risk（不一致点）；expected 按设计语义=chat（得分模块已移除）"
+      "id": "ADV-001", "input": "风险打分", "expected": "chat", "level": "hard", "category": "adversarial", "note": "树层命中 branch_18（风险+打分）→ query_risk_score 预留叶子 → 未开通 chat（得分模块未开通）；expected=chat 一致"
     },
     {
-      "id": "ADV-002", "input": "给小米科技的风险评分", "expected": "chat", "level": "hard", "category": "adversarial", "note": "排除词'评分'否决 risk；同上不一致点"
+      "id": "ADV-002", "input": "给小米科技的风险评分", "expected": "chat", "level": "hard", "category": "adversarial", "note": "树层命中 branch_18（风险+评分）→ 预留叶子 → 未开通 chat，与 expected 一致"
     },
     {
-      "id": "ADV-003", "input": "查一下历史风险", "expected": "clarify", "level": "hard", "category": "adversarial", "note": "risk + historical 跨组冲突；'历史风险'语义歧义 → 期望澄清"
+      "id": "ADV-003", "input": "查一下历史风险", "expected": "clarify", "level": "hard", "category": "adversarial", "note": "risk + historical 跨组冲突；'历史风险'语义歧义 → 期望澄清（已知取舍：现状树层唯一命中 query_risk_history 预留叶子 → 未开通 chat，clarify 语义保留待后续）"
     },
     {
       "id": "ADV-004", "input": "查一下小米科技2024年的尽调报告", "expected": "query_due_diligence_reports", "level": "hard", "category": "adversarial", "note": "对抗点：无'历史'字眼，确定性层命中 generate_report → 语义错误路由；expected 按语义标注"
@@ -625,6 +632,45 @@
     },
     {
       "id": "ADV-024", "input": "帮我查一下小米科技的受益所有人信息", "expected": "query_beneficiary_info", "level": "easy", "category": "adversarial", "note": "正例：'受益所有人'命中"
+    },
+    {
+      "id": "NEW-001", "input": "帮我做一下e缴费的尽职调查", "expected": "chat", "level": "easy", "category": "new_features", "note": "matchable 预留：e缴费+尽调 → 未开通提示"
+    },
+    {
+      "id": "NEW-002", "input": "银企互联的尽调报告", "expected": "chat", "level": "easy", "category": "new_features", "note": "matchable 预留：银企互联+尽调 → 未开通提示"
+    },
+    {
+      "id": "NEW-003", "input": "融e聚业务怎么做尽职调查", "expected": "chat", "level": "easy", "category": "new_features", "note": "matchable 预留：融e聚+尽调 → 未开通提示"
+    },
+    {
+      "id": "NEW-004", "input": "查询财智账户卡的尽调信息", "expected": "chat", "level": "easy", "category": "new_features", "note": "matchable 预留：财智账户卡+尽调 → 未开通提示"
+    },
+    {
+      "id": "NEW-005", "input": "查一下小米科技的历史风险记录", "expected": "chat", "level": "easy", "category": "new_features", "note": "预留叶子：风险+记录 → query_risk_history 未注册 → 未开通提示"
+    },
+    {
+      "id": "NEW-006", "input": "风险评价一下小米科技", "expected": "chat", "level": "easy", "category": "new_features", "note": "预留叶子：风险+评价 → query_risk_score 未注册 → 未开通提示"
+    },
+    {
+      "id": "NEW-007", "input": "核实一下小米科技法定代表人的身份", "expected": "chat", "level": "easy", "category": "new_features", "note": "预留叶子：法定代表人+身份+核实 → verify_natural_person 未注册 → 未开通提示"
+    },
+    {
+      "id": "NEW-008", "input": "查询小米科技的实控人", "expected": "query_beneficiary_info", "level": "easy", "category": "new_features", "note": "黑名单互斥：'实控人'否决 basic 兜底 → branch_7 唯一命中"
+    },
+    {
+      "id": "NEW-009", "input": "查询云禾科技的营业执照信息", "expected": "query_company_basic_info", "level": "medium", "category": "new_features", "note": "黑名单场景：'营业执照'否决 basic 兜底 → LLM 兜底规则 16（查询行为词+企业对象）仍路由 basic"
+    },
+    {
+      "id": "NEW-010", "input": "查询小米科技的法定代表人信息", "expected": "query_company_basic_info", "level": "medium", "category": "new_features", "note": "黑名单场景：'法定代表人'否决 basic 兜底 → LLM 兜底规则 16 路由 basic（法定代表人属工商基本信息）"
+    },
+    {
+      "id": "NEW-011", "input": "查询小米科技的风险评估情况", "expected": "check_company_risk", "level": "easy", "category": "new_features", "note": "'风险评估'→branch_3 唯一命中（'评估'非评分维度词，branch_18 需风险+评分同现）"
+    },
+    {
+      "id": "NEW-012", "input": "查询云禾科技的账户管控情况", "expected": "query_pboc_account_control", "level": "easy", "category": "new_features", "note": "'账户管控'命中 branch_19（'账户'黑名单否决 basic 兜底）→ 确定性路由"
+    },
+    {
+      "id": "NEW-013", "input": "查询财智账户卡", "expected": "chat", "level": "medium", "category": "new_features", "note": "'财智账户卡'无'尽调'语境 → 不触发 matchable → LLM 兜底按普通对话处理"
     }
   ]
 }

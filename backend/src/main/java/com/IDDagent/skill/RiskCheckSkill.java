@@ -1,13 +1,26 @@
 package com.IDDagent.skill;
 
+import com.IDDagent.config.AppConfig;
 import com.IDDagent.service.CompanyNameExtractor;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.*;
 
 @Component
 public class RiskCheckSkill {
+
+    private static final Logger log = LoggerFactory.getLogger(RiskCheckSkill.class);
+
+    private static final ObjectMapper mapper = new ObjectMapper();
 
     private static final String RISK_FILE = "data-template/risk_check.json";
     private static final String NAME_INDEX_FILE = "data-template/company_name_index.json";
@@ -18,9 +31,13 @@ public class RiskCheckSkill {
     private static final String RISK_SUFFIXES = "的风险情况|的风险信息|的风险|风险情况|风险信息|风险|情况|信息";
 
     private final SkillRegistry registry;
+    private final WebClient webClient;
+    private final AppConfig config;
 
-    public RiskCheckSkill(SkillRegistry registry) {
+    public RiskCheckSkill(SkillRegistry registry, WebClient webClient, AppConfig config) {
         this.registry = registry;
+        this.webClient = webClient;
+        this.config = config;
     }
 
     @PostConstruct
@@ -106,7 +123,7 @@ public class RiskCheckSkill {
         }
 
         Map<String, Object> resp = new HashMap<>();
-        resp.put("action", "not_found");
+        resp.put("action", "info_needed");
         resp.put("message", "请提供企业名称或统一信用代码进行查询。");
         return resp;
     }
@@ -117,18 +134,121 @@ public class RiskCheckSkill {
         String code = (String) data.get("credit_code");
         // 模板数据用 enterprise_name，统一映射为 company_name
         String companyName = (String) data.getOrDefault("company_name", data.get("enterprise_name"));
-        String riskLevel = computeRiskLevel(data);
-        boolean hasRisk = !"low".equals(riskLevel);
 
         Map<String, Object> result = new HashMap<>();
         result.put("action", "result");
         result.put("credit_code", code);
         result.put("company_name", companyName);
-        result.put("has_risk", hasRisk);
-        result.put("risk_level", riskLevel);
-        result.put("risk_summary", data.get("risk_summary"));
+        // 风险摘要由大模型根据报告 details 内容摘要生成，替代模板固定文案
+        // （不再返回 risk_level/has_risk，结论口径统一由摘要文本表达；调用失败时回退模板原文）
+        result.put("risk_summary", summarizeRiskSummary(data));
         result.put("h5_url", baseUrl + "/h5/risk-report.html?code=" + code);
         return result;
+    }
+
+    /**
+     * 利用大模型对风险报告 details 内容进行摘要总结，生成风险预查结论文案。
+     * - 输入：各维度（工商信息/反洗钱/融安E信）的结构化核查项
+     * - 输出：2-3 句客观精炼的风险摘要（列出主要风险点及严重程度，不输出风险等级标签）
+     * - 失败回退：未配置 API Key 或调用/解析异常时回退模板原始 risk_summary，保证卡片始终有内容
+     */
+    private String summarizeRiskSummary(Map<String, Object> data) {
+        String apiKey = config.getDeepseek().getApiKey();
+        if (apiKey == null || apiKey.isEmpty()) {
+            log.warn("DEEPSEEK_API_KEY not set, risk summary falls back to raw text");
+            return (String) data.getOrDefault("risk_summary", "暂未发现风险点");
+        }
+        try {
+            Map<String, Object> requestBody = new LinkedHashMap<>();
+            requestBody.put("model", config.getModel().getName());
+            requestBody.put("messages", List.of(
+                    Map.of("role", "system", "content",
+                            "你是一位银行风控合规专家。根据客户风险核查的结构化结果，客观、精炼地总结该客户的风险状况：" +
+                            "列出主要风险点（命中项）及其严重程度，不要输出“高风险/中风险/低风险”等风险等级标签。" +
+                            "直接输出 2-3 句总结文本，不要输出 JSON、标题或任何多余格式。"),
+                    Map.of("role", "user", "content", buildSummaryPrompt(data))
+            ));
+            requestBody.put("temperature", 0.3);
+            requestBody.put("max_tokens", 500);
+            requestBody.put("thinking", Map.of("type", "disabled"));
+
+            String response = webClient.post()
+                    .uri(config.getDeepseek().getBaseUrl() + "/chat/completions")
+                    .header("Authorization", "Bearer " + apiKey)
+                    .header("Content-Type", "application/json")
+                    .bodyValue(requestBody)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, resp ->
+                            resp.bodyToMono(String.class).flatMap(body -> {
+                                log.error("风险摘要 LLM 调用失败: status={}, body={}", resp.statusCode(), body);
+                                return Mono.error(new RuntimeException("LLM API error: " + resp.statusCode()));
+                            }))
+                    .bodyToMono(String.class)
+                    .block(Duration.ofSeconds(30));
+
+            String summary = parseSummaryResponse(response);
+            if (summary != null && !summary.isBlank()) {
+                log.info("风险摘要生成成功: {}", summary);
+                return summary;
+            }
+        } catch (Exception e) {
+            log.error("风险摘要生成失败，回退模板原文: {}", e.getMessage());
+        }
+        return (String) data.getOrDefault("risk_summary", "暂未发现风险点");
+    }
+
+    /**
+     * 将报告 details 各维度核查项结构化为供 LLM 摘要的文本输入。
+     */
+    @SuppressWarnings("unchecked")
+    private String buildSummaryPrompt(Map<String, Object> data) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("企业名称：").append(data.getOrDefault("company_name", data.get("enterprise_name"))).append("\n");
+        sb.append("统一信用代码：").append(data.getOrDefault("credit_code", "")).append("\n");
+        sb.append("以下为该客户各维度风险核查结果：\n");
+        Object detailsObj = data.get("details");
+        if (detailsObj instanceof Map) {
+            Map<String, Object> details = (Map<String, Object>) detailsObj;
+            for (var entry : details.entrySet()) {
+                if (!(entry.getValue() instanceof Map)) continue;
+                Map<String, Object> module = (Map<String, Object>) entry.getValue();
+                sb.append("\n【").append(module.getOrDefault("name", entry.getKey())).append("】\n");
+                Object itemsObj = module.get("items");
+                if (!(itemsObj instanceof List)) continue;
+                for (Object itemObj : (List<?>) itemsObj) {
+                    if (!(itemObj instanceof Map)) continue;
+                    Map<String, Object> item = (Map<String, Object>) itemObj;
+                    Object result = item.getOrDefault("result", item.getOrDefault("riskLevel", "—"));
+                    sb.append("- ").append(item.getOrDefault("name", "")).append("：").append(result);
+                    Object detail = item.get("detail");
+                    if (detail != null && !detail.toString().isBlank()) {
+                        sb.append("（").append(detail).append("）");
+                    }
+                    sb.append("\n");
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 解析 LLM 摘要响应，提取 choices[0].message.content 纯文本。
+     */
+    @SuppressWarnings("unchecked")
+    private String parseSummaryResponse(String response) {
+        if (response == null || response.isBlank()) return "";
+        try {
+            Map<String, Object> respMap = mapper.readValue(response, new TypeReference<>() {});
+            List<Map<String, Object>> choices = (List<Map<String, Object>>) respMap.get("choices");
+            if (choices == null || choices.isEmpty()) return "";
+            Map<String, Object> message = (Map<String, Object>) choices.get(0).get("message");
+            if (message == null) return "";
+            Object content = message.get("content");
+            return content == null ? "" : content.toString().trim();
+        } catch (Exception e) {
+            log.warn("风险摘要响应解析失败: {}", e.getMessage());
+            return "";
+        }
     }
 
     /**
@@ -316,11 +436,13 @@ public class RiskCheckSkill {
                 resp.put("credit_code", matches.get(0).get("credit_code"));
                 return resp;
             }
+            // 单个相似候选但分数未达自动确认阈值：仍走候选确认（ambiguous）而非 not_found——
+            // 只要存在模糊匹配候选就不应显示"未找到企业"，让用户确认或点"以上都不是"
             Map<String, Object> resp = new HashMap<>();
-            resp.put("action", "not_found");
+            resp.put("action", "ambiguous");
             resp.put("keyword", query);
             resp.put("options", options);
-            resp.put("message", "未找到与「" + query + "」完全匹配的企业，您是否要查询以下相似企业？");
+            resp.put("message", "搜索到 " + matches.size() + " 家与「" + query + "」匹配的企业，请确认要查询哪一家：");
             return resp;
         }
 
@@ -333,20 +455,13 @@ public class RiskCheckSkill {
             return resp;
         }
 
-        if (bestScore >= MIN_AUTO_MATCH_SCORE) {
-            Map<String, Object> resp = new HashMap<>();
-            resp.put("action", "ambiguous");
-            resp.put("keyword", query);
-            resp.put("options", options);
-            resp.put("message", "搜索到 " + matches.size() + " 家与「" + query + "」匹配的企业，请确认要查询哪一家：");
-            return resp;
-        }
-
+        // 存在相似候选但分数未达自动确认阈值：统一走候选确认（ambiguous）。
+        // not_found 仅保留"无任何匹配"场景（matches 为空），保证"未找到企业"与候选不会同时出现
         Map<String, Object> resp = new HashMap<>();
-        resp.put("action", "not_found");
+        resp.put("action", "ambiguous");
         resp.put("keyword", query);
         resp.put("options", options);
-        resp.put("message", "未找到与「" + query + "」完全匹配的企业，以下是名称相似的企业：");
+        resp.put("message", "搜索到 " + matches.size() + " 家与「" + query + "」匹配的企业，请确认要查询哪一家：");
         return resp;
     }
 

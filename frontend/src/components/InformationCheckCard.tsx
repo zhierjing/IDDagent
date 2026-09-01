@@ -1,12 +1,13 @@
 import React from 'react'
 import type { RiskAmbiguousOption } from '../types'
+import CompanyCandidatePanel from './CompanyCandidatePanel'
 
 // ============================================================
 // Props
 // ============================================================
 interface InformationCheckCardProps {
   data: Record<string, unknown>
-  onSendMessage?: (content: string) => void
+  onSendMessage?: (content: string, silent?: boolean) => void
 }
 
 // ============================================================
@@ -14,116 +15,50 @@ interface InformationCheckCardProps {
 // ============================================================
 const InformationCheckCard: React.FC<InformationCheckCardProps> = ({ data, onSendMessage }) => {
   const action = data.action as string | undefined
-  // 所属任务标识（useChat 在候选事件处理时推断并持久化，重载后仍可恢复；旧消息降级）
-  const taskLabel = data.task_label as string | undefined
+  const options = data.options as RiskAmbiguousOption[] | undefined
+  const keyword = data.keyword as string || ''
 
-  // ========== 未找到 ==========
-  if (action === 'not_found') {
-    const options = data.options as RiskAmbiguousOption[] | undefined
-    return (
-      <div className="info-check-card bg-gradient-to-br from-gray-50 to-slate-50 rounded-xl border border-gray-200 overflow-hidden">
-        <div className="p-4">
-          <p className="text-gray-500 text-sm text-center">
-            {(data.message as string) || '未找到相关信息核实数据'}
-          </p>
-        </div>
-        {options && options.length > 0 && (
-          <div className="px-3 pb-3 space-y-2">
-            {options.map((opt) => (
-              <button
-                key={opt.credit_code}
-                onClick={() =>
-                  onSendMessage?.(
-                    // 携带信用代码（与 CompanyNameSelector 一致），技能可直接定位企业，避免二次歧义选项卡
-                    `公司：${opt.company_name}\n统一信用代码：${opt.credit_code}`
-                  )
-                }
-                className="w-full text-left px-4 py-3 rounded-lg border border-amber-200 bg-white
-                           hover:bg-amber-50 hover:border-amber-300 transition-all
-                           flex items-center justify-between group cursor-pointer"
-              >
-                <div>
-                  <div className="text-sm font-medium text-gray-800 group-hover:text-amber-700">
-                    {opt.company_name}
-                  </div>
-                  <div className="text-xs text-gray-400 font-mono mt-0.5">
-                    {opt.credit_code}
-                  </div>
-                </div>
-                <svg className="w-4 h-4 text-amber-400 group-hover:text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-              </button>
-            ))}
-            <button
-              onClick={() => onSendMessage?.('以上都不是')}
-              className="w-full px-4 py-3 rounded-lg border border-dashed border-gray-300 bg-white/60
-                         hover:bg-gray-100 hover:border-gray-400 transition-all
-                         flex items-center justify-center gap-1.5 group cursor-pointer"
-            >
-              <span className="text-sm text-gray-500 group-hover:text-gray-700">以上都不是</span>
-            </button>
-          </div>
-        )}
-      </div>
+  // 候选点击：携带信用代码（与 CompanyNameSelector 一致）静默发送，
+  // 技能可直接定位企业避免二次歧义选项卡，且不展示企业名/信用代码于 user 气泡。
+  // Phase 6：优先发送结构化交互协议（select_candidate + frameId/interactionId，
+  // 后端校验帧归属——挂起帧旧卡点击被拒）；旧卡无 frameId 时回退文本格式
+  const handleSelect = (opt: RiskAmbiguousOption) => {
+    const confirmText = `公司：${opt.company_name}\n统一信用代码：${opt.credit_code}`
+    const frameId = data.frameId as string | undefined
+    const interactionId = data.interactionId as string | undefined
+    onSendMessage?.(
+      frameId && interactionId
+        ? JSON.stringify({ action: 'select_candidate', frameId, interactionId, input: confirmText })
+        : confirmText,
+      true
     )
   }
 
-  // ========== 名称歧义 ==========
-  if (action === 'ambiguous') {
-    const options = data.options as RiskAmbiguousOption[] | undefined
-    const keyword = data.keyword as string || ''
-
+  // ========== 未找到：空态卡片（无"以上都不是"选项） ==========
+  if (action === 'not_found') {
     return (
-      <div className="info-check-card bg-gradient-to-br from-amber-50 to-yellow-50 rounded-xl border border-amber-200 overflow-hidden">
-        <div className="px-4 py-3 border-b border-amber-100 bg-white/60">
-          <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-            <span className="text-lg">🔍</span>
-            {taskLabel ? `${taskLabel} · 请确认要核实的企业` : '请确认要核实的企业'}
-          </h3>
-          {keyword && (
-            <p className="text-xs text-gray-500 mt-1">
-              搜索到 {options?.length || 0} 家名称包含"{keyword}"的企业
-            </p>
-          )}
-        </div>
-        <div className="p-3 space-y-2">
-          {options?.map((opt) => (
-            <button
-              key={opt.credit_code}
-              onClick={() =>
-                onSendMessage?.(
-                  // 携带信用代码（与 CompanyNameSelector 一致），技能可直接定位企业，避免二次歧义选项卡
-                  `公司：${opt.company_name}\n统一信用代码：${opt.credit_code}`
-                )
-              }
-              className="w-full text-left px-4 py-3 rounded-lg border border-amber-200 bg-white
-                         hover:bg-amber-50 hover:border-amber-300 transition-all
-                         flex items-center justify-between group cursor-pointer"
-            >
-              <div>
-                <div className="text-sm font-medium text-gray-800 group-hover:text-amber-700">
-                  {opt.company_name}
-                </div>
-                <div className="text-xs text-gray-400 font-mono mt-0.5">
-                  {opt.credit_code}
-                </div>
-              </div>
-              <svg className="w-4 h-4 text-amber-400 group-hover:text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
-            </button>
-          ))}
-          <button
-            onClick={() => onSendMessage?.('以上都不是')}
-            className="w-full px-4 py-3 rounded-lg border border-dashed border-gray-300 bg-white/60
-                       hover:bg-gray-100 hover:border-gray-400 transition-all
-                       flex items-center justify-center gap-1.5 group cursor-pointer"
-          >
-            <span className="text-sm text-gray-500 group-hover:text-gray-700">以上都不是</span>
-          </button>
-        </div>
-      </div>
+      <CompanyCandidatePanel
+        variant="not_found"
+        title="信息核实"
+        options={options}
+        notFoundMessage={(data.message as string) || '未找到相关信息核实数据'}
+        onSelect={handleSelect}
+      />
+    )
+  }
+
+  // ========== 名称歧义：候选确认卡片 ==========
+  if (action === 'ambiguous') {
+    return (
+      <CompanyCandidatePanel
+        variant="ambiguous"
+        title="信息核实"
+        confirmLabel="请选择要核实的企业"
+        keyword={keyword}
+        options={options}
+        onSelect={handleSelect}
+        onNoneOfAbove={() => onSendMessage?.('以上都不是')}
+      />
     )
   }
 

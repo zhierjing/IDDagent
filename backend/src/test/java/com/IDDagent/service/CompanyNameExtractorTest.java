@@ -264,4 +264,47 @@ class CompanyNameExtractorTest {
         assertFalse(CompanyNameExtractor.isValidCompanyName("个企业"));
         assertFalse(CompanyNameExtractor.isValidCompanyName("帮我查云禾科技"));
     }
+
+    // ============================================================
+    // isSameCompany 同一企业判定（简称/全称互不包含修复：P1/P2）
+    // ============================================================
+
+    /** 日志场景根因用例：简称/全称互不包含但剥后缀后核心名一致 → 同一企业 */
+    @Test
+    void sameCompanyShortVsFullNameWithDifferentSuffix() {
+        assertTrue(CompanyNameExtractor.isSameCompany("小米科技有限责任公司", "小米科技公司"));
+        assertTrue(CompanyNameExtractor.isSameCompany("小米科技公司", "小米科技有限责任公司"));
+        assertTrue(CompanyNameExtractor.isSameCompany("北京星河科技", "星河科技有限公司"));
+        assertTrue(CompanyNameExtractor.isSameCompany("星河科技股份有限公司", "星河科技"));
+    }
+
+    /** 相等或直接包含 → 同一企业 */
+    @Test
+    void sameCompanyDirectContainsOrEqual() {
+        assertTrue(CompanyNameExtractor.isSameCompany("云禾科技", "云禾科技"));
+        assertTrue(CompanyNameExtractor.isSameCompany("云禾科技有限公司", "云禾科技"));
+        assertTrue(CompanyNameExtractor.isSameCompany("小米科技", "北京小米科技"));
+    }
+
+    /** 核心名不同 → 不同企业（多企业管道任务参数保持不刷新） */
+    @Test
+    void differentCompaniesNotSame() {
+        assertFalse(CompanyNameExtractor.isSameCompany("小米科技", "星河科技"));
+        assertFalse(CompanyNameExtractor.isSameCompany("云禾科技有限公司", "小米科技有限责任公司"));
+    }
+
+    /** 任一侧为空/空串 → 视为同一（不构成换企业证据，宽松补全语义与原逻辑一致） */
+    @Test
+    void blankSideTreatsAsSameCompany() {
+        assertTrue(CompanyNameExtractor.isSameCompany("小米科技", null));
+        assertTrue(CompanyNameExtractor.isSameCompany(null, "小米科技"));
+        assertTrue(CompanyNameExtractor.isSameCompany("", ""));
+        assertTrue(CompanyNameExtractor.isSameCompany("小米科技", ""));
+    }
+
+    /** 剥后缀后无有效核心名（纯"公司"）→ 回退原名比较，不误判同一 */
+    @Test
+    void degenerateSuffixOnlyNameNotSame() {
+        assertFalse(CompanyNameExtractor.isSameCompany("小米科技", "公司"));
+    }
 }

@@ -1,12 +1,13 @@
 import React from 'react'
 import type { RiskAmbiguousOption } from '../types'
+import CompanyCandidatePanel from './CompanyCandidatePanel'
 
 // ============================================================
 // Props
 // ============================================================
 interface CompanyQueryCardProps {
   data: Record<string, unknown>
-  onSendMessage?: (content: string) => void
+  onSendMessage?: (content: string, silent?: boolean) => void
 }
 
 // ============================================================
@@ -60,65 +61,35 @@ const CompanyQueryCard: React.FC<CompanyQueryCardProps> = ({ data, onSendMessage
   const action = data.action as string | undefined
   const queryLabel = (data.query_label as string) || '企业信息'
   const queryType = (data.query_type as string) || ''
-  // 所属任务标识（useChat 在候选事件处理时推断并持久化，重载后仍可恢复；旧消息降级）
-  const taskLabel = data.task_label as string | undefined
 
   // ========== 未找到 / 名称歧义（候选选择） ==========
   if (action === 'not_found' || action === 'ambiguous') {
     const options = data.options as RiskAmbiguousOption[] | undefined
     const keyword = data.keyword as string || ''
     const isAmbiguous = action === 'ambiguous'
+    // 头部功能名称：以后端下发的查询功能标签（如"基本信息"）为准，旧消息降级"企业信息"
+    const title = queryLabel || '企业信息'
     return (
-      <div
-        className={`company-query-card rounded-xl border overflow-hidden bg-gradient-to-br ${
-          isAmbiguous ? 'from-amber-50 to-yellow-50 border-amber-200' : 'from-gray-50 to-slate-50 border-gray-200'
-        }`}
-      >
-        <div className={`px-4 py-3 border-b bg-white/60 ${isAmbiguous ? 'border-amber-100' : 'border-gray-100'}`}>
-          <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-            <span className="text-lg">{isAmbiguous ? '🔍' : 'ℹ️'}</span>
-            {isAmbiguous
-              ? taskLabel
-                ? `${taskLabel} · 请确认要查询${queryLabel}的企业`
-                : `请确认要查询${queryLabel}的企业`
-              : '未找到匹配企业'}
-          </h3>
-          {keyword && (
-            <p className="text-xs text-gray-500 mt-1">
-              搜索到 {options?.length || 0} 家名称包含"{keyword}"的企业
-            </p>
-          )}
-        </div>
-        <div className="p-3 space-y-2">
-          {options?.map((opt) => (
-            <button
-              key={opt.credit_code}
-              onClick={() => onSendMessage?.(`帮我查一下${opt.company_name}${queryLabel}`)}
-              className="w-full text-left px-4 py-3 rounded-lg border border-amber-200 bg-white
-                         hover:bg-amber-50 hover:border-amber-300 transition-all
-                         flex items-center justify-between group cursor-pointer"
-            >
-              <div>
-                <div className="text-sm font-medium text-gray-800 group-hover:text-amber-700">
-                  {opt.company_name}
-                </div>
-                <div className="text-xs text-gray-400 font-mono mt-0.5">{opt.credit_code}</div>
-              </div>
-              <svg className="w-4 h-4 text-amber-400 group-hover:text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
-            </button>
-          ))}
-          <button
-            onClick={() => onSendMessage?.('以上都不是')}
-            className="w-full px-4 py-3 rounded-lg border border-dashed border-gray-300 bg-white/60
-                       hover:bg-gray-100 hover:border-gray-400 transition-all
-                       flex items-center justify-center gap-1.5 group cursor-pointer"
-          >
-            <span className="text-sm text-gray-500 group-hover:text-gray-700">以上都不是</span>
-          </button>
-        </div>
-      </div>
+      <CompanyCandidatePanel
+        variant={isAmbiguous ? 'ambiguous' : 'not_found'}
+        title={title}
+        keyword={keyword}
+        options={options}
+        onSelect={(opt) => {
+          // Phase 6：优先发送结构化交互协议（select_candidate + frameId/interactionId，
+          // 后端校验帧归属——挂起帧旧卡点击被拒）；旧卡无 frameId 时回退文本查询句
+          const queryText = `帮我查一下${opt.company_name}${queryLabel}`
+          const frameId = data.frameId as string | undefined
+          const interactionId = data.interactionId as string | undefined
+          onSendMessage?.(
+            frameId && interactionId
+              ? JSON.stringify({ action: 'select_candidate', frameId, interactionId, input: queryText })
+              : queryText,
+            true
+          )
+        }}
+        onNoneOfAbove={() => onSendMessage?.('以上都不是')}
+      />
     )
   }
 

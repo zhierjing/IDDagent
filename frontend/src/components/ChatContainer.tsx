@@ -6,7 +6,7 @@ import ChatInput from './ChatInput';
 interface ChatContainerProps {
   messages: ChatMessage[];
   isSending: boolean;
-  onSend: (message: string, attachments?: ChatAttachment[]) => void;
+  onSend: (message: string, attachments?: ChatAttachment[], silent?: boolean) => void;
   onStop?: () => void;
 }
 
@@ -77,7 +77,13 @@ const ChatContainer: React.FC<ChatContainerProps> = ({
             </div>
           ) : (
             messages.map((msg) => (
-              <ChatMessageComponent key={msg.id} message={msg} onSendMessage={onSend} />
+              <ChatMessageComponent
+                key={msg.id}
+                message={msg}
+                // 包装透传：卡片交互可携带 silent 标记（不展示为用户气泡），
+                // 与输入框的附件发送（第二参 attachments）区分开
+                onSendMessage={(content, silent) => onSend(content, undefined, silent)}
+              />
             ))
           )}
           <div ref={bottomRef} />

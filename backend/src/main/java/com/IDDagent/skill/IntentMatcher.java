@@ -116,6 +116,58 @@ public class IntentMatcher {
     }
 
     /**
+     * 多意图补检：找出"触发词命中但因排除词被否决"的技能。
+     * 唯一候选路径上调用：若存在此类技能（如"查X风险和信息"中 query_company_basic_info
+     * 被排除词"风险"否决），说明输入可能混合了多个意图，需并入候选列表交给 LLM 仲裁
+     * （仲裁支持 multi 输出），避免零延迟参数提取路径跳过 LLM 导致多意图无法识别。
+     *
+     * @return 被否决技能列表，无则空列表
+     */
+    public List<ExcludedSkill> findTriggeredButExcluded(String userMessage) {
+        if (userMessage == null || userMessage.isBlank()) {
+            return List.of();
+        }
+
+        List<ExcludedSkill> excluded = new ArrayList<>();
+        for (Skill skill : skillRegistry.getSkills()) {
+            if (!skill.hasMeta()) {
+                continue; // 无元数据，不参与确定性匹配
+            }
+
+            // 触发词命中（否则该技能本就与本消息无关）
+            List<String> matched = new ArrayList<>();
+            for (String kw : skill.getKeywords()) {
+                if (userMessage.contains(kw)) {
+                    matched.add(kw);
+                }
+            }
+            if (matched.isEmpty()) continue;
+
+            // 排除词命中（未命中排除词则本就是候选，不属于本方法范围）
+            List<String> hitExcludes = new ArrayList<>();
+            for (String excl : skill.getExcludeKeywords()) {
+                if (userMessage.contains(excl)) {
+                    hitExcludes.add(excl);
+                }
+            }
+            if (hitExcludes.isEmpty()) continue;
+
+            excluded.add(new ExcludedSkill(skill.getName(), skill.getLabel(), matched, hitExcludes));
+        }
+        return excluded;
+    }
+
+    /**
+     * 被排除词否决但触发词命中的技能（多意图补检用）
+     */
+    public record ExcludedSkill(
+            String skillName,
+            String label,
+            List<String> matchedKeywords,
+            List<String> excludedBy
+    ) {}
+
+    /**
      * 技能匹配候选
      */
     public record SkillCandidate(

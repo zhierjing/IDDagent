@@ -2,7 +2,7 @@
 // 后端 API 封装层
 // ============================================================
 
-import type { ConversationListItem, Conversation, SSEEvent, ChatAttachment } from '../types';
+import type { ConversationListItem, Conversation, SSEEvent, ChatAttachment, InterruptAskData } from '../types';
 
 const API_BASE = '/api';
 
@@ -240,18 +240,24 @@ export async function sendMessageStream(
  * 报告 status === 'completed' 时调用；接口幂等（无挂起任务时返回 skipped）。
  * 注意：该接口不在 JwtAuthFilter 白名单内，必须携带 Authorization 头，
  * 否则返回 401 且管道永远停留在 waitingReportTask 挂起状态。
+ * Phase 7：附带 reportId（外部任务标识），后端按 externalTaskId/frameId 精确定位
+ * 归属帧（穿插挂起期间完成时入 DeferredEvent），不再仅靠栈序兑底。
  */
-export async function notifyReportCompleted(conversationId: string): Promise<{
+export async function notifyReportCompleted(conversationId: string, reportId?: string): Promise<{
   ok: boolean;
   skipped?: boolean;
+  deferred?: boolean;
   completed?: boolean;
   allDone?: boolean;
   remaining?: number;
+  /** 本管道全部完成但挂起栈仍有旧管道（穿插场景）：前端本地注入 interrupt_ask 询问卡 */
+  hasSuspended?: boolean;
+  interruptAsk?: InterruptAskData;
 }> {
   const res = await fetch(`${API_BASE}/chat/report-completed`, {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ conversationId }),
+    body: JSON.stringify({ conversationId, reportId }),
   });
   if (!res.ok) throw new Error(`通知报告完成失败: ${res.status}`);
   return res.json();

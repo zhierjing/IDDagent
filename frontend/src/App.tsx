@@ -30,10 +30,20 @@ const App: React.FC = () => {
   );
 
   // ---- 应用状态 ----
-  const [conversationId, setConversationId] = useState<string | null>(null);
+  // 从 localStorage 恢复上次会话 ID：此前初始化为 null 导致刷新页面后
+  // 对话级 pending 轮询（conversationId 为空直接 return）失效，
+  // H5 新标签页生成的报告进度/完成卡永远无法注入（"无卡片"根因之一）
+  const [conversationId, setConversationId] = useState<string | null>(() =>
+    localStorage.getItem('currentConversationId')
+  );
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [conversationsLoading, setConversationsLoading] = useState(false);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
+
+  // 已调用过 report-completed 推进的报告 ID 集合（按 reportId 去重）：
+  // /active 与 /pending 两个 3s 轮询都会对 completed 报告调推进接口，不按 reportId
+  // 去重会重复调用（后端幂等返回 skipped，但日志刷屏）；与后端 consumed 标记双保险
+  const processedReportIdsRef = useRef<Set<string>>(new Set());
 
   const isAuthenticated = !!token && !!user;
 
@@ -70,12 +80,12 @@ const App: React.FC = () => {
   // 报告进度消息注入（将进度卡片以智能体消息形式插入聊天流）
   // ================================================================
 
-  /** 向聊天流注入一条进度卡片消息（消息列表中已存在同 reportId 则不重复注入） */
+  /** 向聊天流注入一条进度卡片消息（穿插场景按对话时间线定位在穿插恢复点之后） */
   const injectProgressMessage = useCallback((reportId: string, createdAt?: string) => {
     setMessages((prev) => {
-      if (prev.some((m) => m.id === `report-progress-${reportId}`)) return prev;
+      const cardId = `report-progress-${reportId}`;
       const card = {
-        id: `report-progress-${reportId}`,
+        id: cardId,
         role: 'assistant' as const,
         content: '',
         extra: {
@@ -86,24 +96,49 @@ const App: React.FC = () => {
         },
         created_at: createdAt || new Date().toISOString(),
       };
-      // 1) 优先插入到会话中最后一条"报告生成流程"消息（模板选择卡/跳转卡）之后，
-      //    让进度卡片固定在其初始返回位置，而非追加到消息末尾
+      const oldIdx = prev.findIndex((m) => m.id === cardId);
+      // 1) 穿插恢复点定位：最后一条 interrupt_ask 卡（穿插询问）即穿插段落的分界，
+      //    进度卡必须出现在其之后（穿插后段落），否则会插回穿插前段落（根因）；
+      //    旧卡已位于恢复点之后则保持原位——轮询每 3s 重注入不抖动，避免把 done
+      //    事件在流末尾追加的绿色完成卡挤到进度卡之前
+      let anchorIdx = -1;
       for (let i = prev.length - 1; i >= 0; i--) {
         const extra = (prev[i] as { extra?: Record<string, unknown> }).extra;
-        if (extra && extra._skill_name === 'generate_report') {
-          const next = [...prev];
+        if (extra && extra.action === 'interrupt_ask') {
+          anchorIdx = i;
+          break;
+        }
+      }
+      if (anchorIdx !== -1) {
+        if (oldIdx !== -1 && oldIdx > anchorIdx) return prev;
+        // 旧卡（若存在）位于锚点之前被移除后锚点位置左移一位，插入位置相应前移
+        const insertPos = oldIdx !== -1 && oldIdx < anchorIdx ? anchorIdx : anchorIdx + 1;
+        const next = prev.filter((m) => m.id !== cardId);
+        next.splice(insertPos, 0, card);
+        return next;
+      }
+      // 2) 无穿插恢复点：插入到会话中最后一条未隐藏的"报告生成流程"消息
+      //    （模板选择卡/跳转卡）之后，固定在其初始返回位置而非追加到末尾
+      const next = prev.filter((m) => m.id !== cardId);
+      for (let i = next.length - 1; i >= 0; i--) {
+        const extra = (next[i] as { extra?: Record<string, unknown> }).extra;
+        if (
+          extra &&
+          extra._skill_name === 'generate_report' &&
+          extra.stage !== 'progress' &&
+          extra.hidden !== true
+        ) {
           next.splice(i + 1, 0, card);
           return next;
         }
       }
-      // 2) 兜底：按任务创建时间排序插入
+      // 3) 兜底：按任务创建时间排序插入（基于去重后的数组计算，位置稳定不抖动）
       if (createdAt) {
         const cardTime = new Date(createdAt).getTime();
-        const insertIdx = prev.findIndex((m) => {
+        const insertIdx = next.findIndex((m) => {
           const t = m.created_at ? new Date(m.created_at).getTime() : 0;
           return t > cardTime;
         });
-        const next = [...prev];
         if (insertIdx === -1) {
           next.push(card);
         } else {
@@ -111,7 +146,7 @@ const App: React.FC = () => {
         }
         return next;
       }
-      return [...prev, card];
+      return [...next, card];
     });
   }, [setMessages]);
 
@@ -124,13 +159,21 @@ const App: React.FC = () => {
    * - 中间任务完成 → 仅解除最后一张管道卡 paused，用户下条消息 resume 续跑剩余任务
    * - skipped（无挂起报告任务）→ 直接返回，接口幂等
    */
-  const advancePipelineAfterReport = useCallback(async (convId: string) => {
+  const advancePipelineAfterReport = useCallback(async (convId: string, reportId?: string) => {
+    // 按 reportId 去重：同一报告只调一次推进接口（/active 与 /pending 两个轮询都会触发，
+    // 避免对已完成报告重复调用推进接口导致后端日志刷屏；与后端 consumed 标记双保险）
+    if (reportId && processedReportIdsRef.current.has(reportId)) return;
     try {
       // 必须携带 Authorization：/api/chat/report-completed 不在 JwtAuthFilter
       // 白名单内，裸 fetch 会 401，导致管道永久停留在 waitingReportTask 挂起
       // 状态、完成卡永不出现（本次 bug 根因）
-      const data = await notifyReportCompleted(convId);
-      if (data.skipped || !data.ok) return;
+      // Phase 7：附带 reportId（外部任务标识），后端精确归属穿插挂起帧（DeferredEvent）
+      const data = await notifyReportCompleted(convId, reportId);
+      // 接口有效响应（无论推进/跳过/推迟）即视为已消费，后续轮询不再重复调用
+      if (reportId) processedReportIdsRef.current.add(reportId);
+      // skipped：无挂起报告任务（幂等返回）；deferred：报告穿插期间已完成，推进动作
+      // 推迟到用户恢复挂起层时由后端统一执行（此时本地卡片由恢复流驱动，不能在此处理）
+      if (data.skipped || data.deferred || !data.ok) return;
       setMessages((prev) => {
         const next = [...prev];
         // 定位最后一张管道卡：allDone 时以其 plan/total 为准追加最终完成卡
@@ -142,7 +185,28 @@ const App: React.FC = () => {
             break;
           }
         }
-        if (lastIdx === -1) return next;
+        // 穿插询问卡数据（本管道全部完成但挂起栈仍有旧管道时由后端返回）
+        const askData = data.hasSuspended && data.interruptAsk ? data.interruptAsk : null;
+        const askCard = askData
+          ? {
+              id: `interrupt-ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              role: 'assistant' as const,
+              content: '',
+              extra: {
+                action: 'interrupt_ask',
+                frameId: askData.frameId,
+                interactionId: askData.interactionId,
+                message: askData.message,
+                plan_summary: askData.plan_summary,
+                total: askData.total,
+              } as Record<string, unknown>,
+              created_at: new Date().toISOString(),
+            }
+          : null;
+        if (lastIdx === -1) {
+          // 防御：消息流中无管道卡（如历史消息未落盘），仍应展示询问卡供用户继续旧管道
+          return askCard ? [...next, askCard] : next;
+        }
         const lastEx = next[lastIdx].extra as unknown as PipelineExtra;
         if (data.allDone) {
           const total = Math.max(lastEx.total ?? 0, lastEx.plan.length);
@@ -184,6 +248,8 @@ const App: React.FC = () => {
                 } as PipelineExtra,
                 created_at: new Date().toISOString(),
               },
+              // 3) 本管道全部完成但挂起栈仍有旧管道（穿插场景）：追加询问卡提示是否继续
+              ...(askCard ? [askCard] : []),
             ];
           }
         } else {
@@ -205,7 +271,7 @@ const App: React.FC = () => {
         for (const r of data.reports) {
           injectProgressMessage(r.reportId, r.createdAt as string | undefined);
           // 报告已完成且管道挂起等待推进：通知后端推进管道
-          if (r.status === 'completed') advancePipelineAfterReport(convId);
+          if (r.status === 'completed') advancePipelineAfterReport(convId, r.reportId);
         }
       }
     } catch { /* ignore */ }
@@ -223,6 +289,13 @@ const App: React.FC = () => {
         if (data.reports && data.reports.length > 0) {
           for (const r of data.reports) {
             injectProgressMessage(r.reportId, r.createdAt as string | undefined);
+            // 刚完成的报告（同步生成 2ms 即完成，generating 态 3s 轮询必错过）：
+            // 后端 active 兜底返回最近窗口内 completed 任务，前端按 reportId 去重注入，
+            // 并携带 conversationId 推进对应会话挂起的管道（与对话级 pending 行为一致）
+            const convId = (r as { conversationId?: string }).conversationId;
+            if (r.status === 'completed' && convId) {
+              advancePipelineAfterReport(convId, r.reportId);
+            }
           }
         }
       } catch { /* ignore */ }
@@ -231,7 +304,7 @@ const App: React.FC = () => {
     checkActive();
     const interval = setInterval(checkActive, 3000);
     return () => clearInterval(interval);
-  }, [isAuthenticated, user?.id, injectProgressMessage]);
+  }, [isAuthenticated, user?.id, injectProgressMessage, advancePipelineAfterReport]);
 
   // 按对话 ID 轮询待处理报告（H5 新标签页生成报告后，原聊天页自动获取进度卡片）
   useEffect(() => {
@@ -246,7 +319,7 @@ const App: React.FC = () => {
           for (const r of data.reports) {
             injectProgressMessage(r.reportId, r.createdAt as string | undefined);
             // 报告已完成且管道挂起等待推进：通知后端推进管道（含最后任务完成转 complete 卡）
-            if (r.status === 'completed') advancePipelineAfterReport(conversationId);
+            if (r.status === 'completed') advancePipelineAfterReport(conversationId, r.reportId);
           }
         }
       } catch { /* ignore */ }
@@ -302,7 +375,38 @@ const App: React.FC = () => {
     try {
       setConversationId(id);
       const conv = await getConversation(id);
-      const msgs: ChatMessage[] = conv.messages.map((m) => {
+      const msgs: ChatMessage[] = conv.messages
+        .filter((m) => {
+          // 静默发送的协议消息（【管道恢复】继续/放弃、结构化恢复协议 JSON）：
+          // 按钮点击时不展示用户气泡，历史恢复时同样过滤，避免刷新/切换会话后
+          // 重新冒出"【管道恢复】继续"或"{"action":"resume_frame"...}"等内部协议文本
+          if (m.role === 'user' && typeof m.content === 'string') {
+            if (m.content.startsWith('【管道恢复】')) {
+              return false;
+            }
+            // Phase 5：结构化恢复协议消息（InterruptAskCard 按钮发送，JSON 文本）
+            if (m.content.includes('"action":"resume_frame"') || m.content.includes('"action":"abandon_frame"')) {
+              return false;
+            }
+            // Phase 6：结构化交互协议消息（select_candidate/select_intent/select_template，
+            // 企业候选/意图澄清/模板卡片点击发送的 JSON）——静默发送，历史恢复同样过滤
+            if (m.content.includes('"action":"select_candidate"')
+                || m.content.includes('"action":"select_intent"')
+                || m.content.includes('"action":"select_template"')) {
+              return false;
+            }
+          }
+          // 恢复路径 supersede 旧跳转卡后，后端已将被取代的穿插前跳转卡持久化标记
+          // hidden=true：过滤掉隐藏消息，跨"切走再切回"保持隐藏
+          if (m.role === 'assistant' && m.content && m.content.trim().startsWith('{')) {
+            try {
+              const parsed = JSON.parse(m.content);
+              if (parsed && typeof parsed === 'object' && parsed.hidden === true) return false;
+            } catch { /* 非 JSON 按普通消息处理 */ }
+          }
+          return true;
+        })
+        .map((m) => {
         const base = {
           id: m.id,
           role: m.role as 'user' | 'assistant',
@@ -321,9 +425,10 @@ const App: React.FC = () => {
             const parsed = JSON.parse(m.content);
             if (parsed && typeof parsed.action === 'string') {
               // 归一化候选选项卡 action：实时 SSE 路径前端设为 company_name_candidates，
-              // 而消息持久化的是技能原始返回值 action=candidates，若不归一化，
-              // 切换对话重载后选项卡（CompanyNameSelector）将无法恢复渲染
-              if (parsed.action === 'candidates') {
+              // 而消息持久化的是技能原始返回值 action=candidates / ambiguous（企业名多候选），
+              // 若不归一化，切换对话重载后选项卡（CompanyNameSelector）将无法恢复渲染：
+              // ambiguous 会命中技能路由分支被渲染成技能结果卡片（如风险识别卡）
+              if (parsed.action === 'candidates' || parsed.action === 'ambiguous') {
                 parsed.action = 'company_name_candidates';
               }
               // info_needed（如"请问您要查询哪家企业"）：实时 SSE 路径是 text_delta/text_done
@@ -349,11 +454,39 @@ const App: React.FC = () => {
     }
   };
 
+  // 挂载后从 localStorage 恢复上次会话：验证会话仍存在后复用"选择会话"路径
+  // 加载消息并注入该会话的待处理报告卡（此前 conversationId 初始化 null 且无恢复逻辑，
+  // 刷新页面后消息列表空白、对话级 pending 轮询失效——报告进度卡永远不出现）
+  const restoredInitialConvRef = useRef(false);
+  useEffect(() => {
+    if (!isAuthenticated || restoredInitialConvRef.current) return;
+    restoredInitialConvRef.current = true;
+    const savedId = localStorage.getItem('currentConversationId');
+    if (!savedId) return;
+    getConversation(savedId)
+      .then((conv) => {
+        if (conv && conv.id) {
+          handleSelectConversation(savedId);
+        } else {
+          localStorage.removeItem('currentConversationId');
+          setConversationId(null);
+        }
+      })
+      .catch(() => {
+        // 会话不存在/已删除（404）：清除恢复值，避免对话级轮询查询无效会话
+        localStorage.removeItem('currentConversationId');
+        setConversationId(null);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated]);
+
   // 删除会话
   const handleDeleteConversation = async (id: string) => {
     try {
       await deleteConversationApi(id);
       if (conversationId === id) {
+        // 删除的是当前会话：同步清除 localStorage 恢复值，避免下次刷新恢复已删除会话
+        localStorage.removeItem('currentConversationId');
         setConversationId(null);
         clearMessages();
       }
@@ -422,7 +555,8 @@ const App: React.FC = () => {
   }, []);
 
   // 发送消息
-  const handleSend = useCallback(async (content: string, attachments?: ChatAttachment[]) => {
+  // silent=true：卡片候选选择等交互指令静默发送（不展示为用户气泡），由卡片组件透传
+  const handleSend = useCallback(async (content: string, attachments?: ChatAttachment[], silent?: boolean) => {
     let currentConvId = conversationIdRef.current;
     if (!currentConvId) {
       try {
@@ -436,7 +570,9 @@ const App: React.FC = () => {
       }
     }
     console.log('📤 App 发送消息, conversationId:', currentConvId);
-    sendMessage(content, currentConvId, attachments);
+    // forceSend=true：卡片交互消息（企业候选确认/功能查询等）不受 isSending 阻挡，
+    // 支持多意图管道执行中穿插；输入框/快捷按钮自带 disabled 保护不会误触发
+    sendMessage(content, currentConvId, attachments, true, silent);
   }, [sendMessage]);
 
   // ---- 未登录：显示登录页 ----
